@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file>resources/background.webm</file>
+        <file>qml/Main.qml</file>
+    </qresource>
+</RCC>

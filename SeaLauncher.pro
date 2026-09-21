@@ -1,4 +1,4 @@
-QT += widgets
+QT += widgets quick multimedia quickcontrols2 quicklayouts quickwidgets
 
 CONFIG += c++17
 
@@ -20,3 +20,9 @@ FORMS += \
 qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
+
+DISTFILES += \
+    qml/Main.qml
+
+RESOURCES += \
+    resources.qrc
