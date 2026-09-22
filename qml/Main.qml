@@ -4,7 +4,6 @@ import QtMultimedia
 import QtQuick.Controls 2.15
 import QtQuick.Effects
 import QtQuick.Layouts
-import Qt5Compat.GraphicalEffects
 
 Item {
     id: root
@@ -14,10 +13,11 @@ Item {
 
     FontLoader {
         id: minecraftFont
-        source: "qrc:/fonts/Minecraft.ttf" // Укажите ваш путь к .ttf файлу шрифта
+        source: "qrc:/fonts/minecraft.ttf" // Укажите ваш путь к .ttf файлу шрифта
     }
 
     Video {
+        objectName: "background"
         id: backgroundVideo
         source: "qrc:/resources/background.webm"
         loops: MediaPlayer.Infinite
@@ -37,8 +37,9 @@ Item {
         anchors.left: parent.left
         anchors.right: parent.right
         height: 32
-        color: Qt.rgba(0, 0, 0, 0.3)
+        color: Qt.rgba(0, 0, 0, 0.8)
         z: 100
+        clip: true
 
         MouseArea {
             anchors.fill: parent
@@ -67,7 +68,7 @@ Item {
                 font.weight: Font.Medium
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignVCenter
-                anchors.centerIn: titleBar
+                anchors.centerIn: parent
             }
 
             component SysButton : Button {
@@ -86,7 +87,7 @@ Item {
             }
 
             SysButton {
-                onClicked: if (Window.window) Window.window.showMinimized()
+                objectName: "minimizeButton"
                 contentItem: Item {
                     anchors.fill: parent
                     Rectangle {
@@ -98,7 +99,7 @@ Item {
             }
 
             SysButton {
-                onClicked: if (Window.window) Window.window.close()
+                objectName: "closeButton"
                 contentItem: Item {
                     anchors.fill: parent
                     Image {
@@ -154,8 +155,8 @@ Item {
                 font.bold: true
                 font.letterSpacing: 1
                 Layout.fillWidth: true
-                Layout.alignment: Qt.AlignHCenter
-                horizontalAlignment: Text.AlignHCenter
+                Layout.alignment: Qt.AlignCenter
+                horizontalAlignment: Text.AlignLeft
                 Layout.topMargin: 10
                 Layout.bottomMargin: 10
             }
@@ -423,9 +424,11 @@ Item {
                 }
 
                 // Горизонтальный ряд карточек новостей
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 16
+                GridLayout {
+                    rowSpacing: 16
+                    columnSpacing: 16
+                    columns: 2
+                    Layout.alignment: parent
 
                     // Шаблон новостной карточки
                     component NewsCard : Rectangle {
@@ -438,50 +441,58 @@ Item {
                         Layout.preferredHeight: 140
                         radius: 8
                         color: "#1E1E24" // Базовый цвет, если картинка не загрузится
-                        border.color: cardMouse.hovered ? "#FFDE7D" : Qt.rgba(1, 1, 1, 0.05)
-                        border.width: 1
+                        //border.color: cardMouse.hovered ? "#FFDE7D" : Qt.rgba(1, 1, 1, 0.05)
+                        //border.width: 2
                         clip: true
-
-                        // Плавная анимация рамки и масштабирования при наведении
-                        Behavior on border.color { ColorAnimation { duration: 150 } }
 
                         HoverHandler { id: cardMouse }
 
-                        // 1. Изображение новости на заднем плане карточки
-                        Item {
-                            id: imageClipContainer
-                            anchors.fill: parent
-
-                            // Включаем аппаратную обрезку для самого контейнера
+                        MultiEffect {
                             clip: true
-
-                            // Заставляем графический движок Qt 6 закруглить пиксели САМОГО контейнера.
-                            // Теперь всё, что находится внутри него (включая картинку со scale: 1.05),
-                            // будет автоматически и гладко обрезаться по радиусу карточки без всяких масок!
-                            layer.enabled: true
-                            layer.effect: MultiEffect {
-                                // Мы НЕ включаем maskEnabled, движок скруглит слой по границам родительского радиуса
-                            }
-
-                            Image {
-                                id: cardImg
-                                source: card.bgImage
-                                anchors.fill: parent
-                                fillMode: Image.PreserveAspectCrop
-                                asynchronous: true
-
-                                // Плавная анимация зума при наведении (теперь работает без исчезновений)
-                                scale: cardMouse.hovered ? 1.05 : 1.0
-                                Behavior on scale { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
-                            }
+                            source: cardImg
+                            anchors.fill: parent
+                            maskEnabled: true
+                            maskSource: cardMask
                         }
 
-                        // 2. Градиентное затемнение ПОВЕРХ картинки (кинематографичный эффект)
-                        // Снизу плашка темнее (чтобы читался текст), сверху — прозрачнее
+                        Image {
+                            id: cardImg
+                            source: card.bgImage
+                            anchors.fill: parent
+                            fillMode: Image.PreserveAspectCrop
+                            asynchronous: true
+                            visible: false
+
+                            scale: cardMouse.hovered ? 1.05 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                        }
+
+                        Item {
+                            clip: true
+                            id: cardMask
+                            anchors.fill: cardImg; layer.enabled: true; visible: false
+                            Rectangle {anchors.fill: parent; radius: parent.parent.radius}
+                        }
+
+                        Rectangle {
+                            id: borderRect
+                            anchors.fill: parent
+                            radius: card.radius
+
+                            color: "transparent"
+                            border.color: cardMouse.hovered ? "#FFDE7D" : Qt.rgba(1, 1, 1, 0.05)
+                            border.width: 2
+
+                            z: 10
+
+                            Behavior on border.color { ColorAnimation { duration: 150 } }
+                        }
+
                         Rectangle {
                             anchors.fill: parent
-                            radius: card.radius // Принудительно скругляем сам градиент
-                            color: "transparent"
+                            radius: parent.radius
+                            color: "black"
+                            clip: true
 
                             gradient: Gradient {
                                 GradientStop { position: 0.0; color: Qt.rgba(0, 0, 0, 0.2) }
@@ -526,7 +537,7 @@ Item {
                     }
 
                     NewsCard {
-                        titleText: "Где то под мостом умер неизвестный \"toast\""
+                        titleText: "Где то под мостом умер некий \"toast\" наевшись залетных карасей"
                         dateText: "21 сентября 2026 г."
                         bgImage: "https://i.imgflip.com/7w38au.jpg"
                     }
@@ -563,7 +574,7 @@ Item {
                         // Объемный текст с черной тенью (каноничный стиль Minecraft GUI)
                         Text {
                             text: "ИГРАТЬ"
-                            color: "#E0E0E0"
+                            color: playButton.hovered ? "#000000" : "#2e2e2e"
 
                             // ИСПОЛЬЗУЕМ ЗАГРУЖЕННЫЙ ШРИФТ MINECRAFT
                             font.family: minecraftFont.name
@@ -575,7 +586,7 @@ Item {
                         }
                         Text {
                             text: "ИГРАТЬ"
-                            color: playButton.hovered ? "#FFFFFF" : "#FFFF55" // При наведении текст светится ярче
+                            color: "#FFFFFF"
                             font.family: minecraftFont.name
                             font.pixelSize: 18
                             anchors.centerIn: parent
@@ -693,9 +704,10 @@ Item {
 
                         Slider {
                             id: ramSlider
+                            objectName: "ramSlider"
                             Layout.fillWidth: true
                             from: 2048
-                            to: 16384
+                            to: 4096
                             stepSize: 1024
                             value: 4096
                             live: true

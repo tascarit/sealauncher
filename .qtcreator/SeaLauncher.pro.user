@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE QtCreatorProject>
-<!-- Written by QtCreator 20.0.1, 2026-09-21T23:05:01. -->
+<!-- Written by QtCreator 20.0.1, 2026-09-22T21:01:52. -->
 <qtcreator>
  <data>
   <variable>EnvironmentId</variable>
@@ -186,7 +186,12 @@
     <value type="bool" key="ProjectExplorer.BuildConfiguration.ClearSystemEnvironment">false</value>
     <valuelist type="QVariantList" key="ProjectExplorer.BuildConfiguration.CustomParsers"/>
     <value type="bool" key="ProjectExplorer.BuildConfiguration.ParseStandardOutput">false</value>
-    <value type="UnknownType" key="ProjectExplorer.BuildConfiguration.UserEnvironmentChanges"></value>
+    <valuemap type="QVariantMap" key="ProjectExplorer.BuildConfiguration.UserEnvironmentChanges">
+     <value type="QString" key="File"></value>
+     <valuelist type="QVariantList" key="UserItems">
+      <value type="QString">Path=C:\Users\tscrt\Tools\mingw1120_64\bin;C:\Qt\6.5.3\mingw_64\bin;C:\Users\tscrt\Tools\mingw1120_64\bin;C:\Program Files\Common Files\Oracle\Java\javapath;C:\Program Files (x86)\Common Files\Oracle\Java\javapath;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\libnvvp;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\libnvvp;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;C:\Program Files\Git\cmd;C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.1.0\;C:\Program Files\NVIDIA Corporation\NVIDIA App\NvDLISR;C:\Program Files\Process Lasso\;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\libnvvp;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin;C:\Users\tscrt\AppData\Local\Programs\Python\Python312\Scripts\;C:\Users\tscrt\AppData\Local\Programs\Python\Python312\;C:\Users\tscrt\AppData\Local\Programs\Python\Python311\Scripts\;C:\Users\tscrt\AppData\Local\Programs\Python\Python311\;C:\Users\tscrt\AppData\Local\Microsoft\WindowsApps;C:\Users\tscrt\AppData\Local\Programs\Microsoft VS Code\bin;C:\itmux_1.1.0_x64_free\bin;C:\Users\tscrt\AppData\Local\Microsoft\WinGet\Packages\miurahr.aqtinstall_Microsoft.Winget.Source_8wekyb3d8bbwe;C:\Users\tscrt\Tools\mingw1120_64\bin</value>
+     </valuelist>
+    </valuemap>
     <value type="QString" key="ProjectExplorer.ProjectConfiguration.DisplayName">Release</value>
     <value type="QString" key="ProjectExplorer.ProjectConfiguration.Id">Qt4ProjectManager.Qt4BuildConfiguration</value>
     <value type="qlonglong" key="ProjectExplorer.Target.ActiveDeployConfiguration">0</value>

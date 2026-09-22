@@ -1,4 +1,4 @@
-QT += widgets quick multimedia quickcontrols2 quicklayouts quickwidgets quickeffects
+QT += widgets quick multimedia quickcontrols2 quicklayouts quickwidgets
 
 CONFIG += c++17
 
@@ -14,6 +14,7 @@ SOURCES += \
     mainwindow.cpp
 
 HEADERS += \
+    SettingsController.h \
     mainwindow.h
 
 FORMS += \

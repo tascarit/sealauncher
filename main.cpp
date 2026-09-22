@@ -8,13 +8,16 @@
 #include <QFile>
 #include <QStatusBar>
 
+#include "SettingsController.h"
+
 int main(int argc, char *argv[])
 {
-    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
 
     QApplication a(argc, argv);
     MainWindow w;
     QQuickWidget *qmlWidget = new QQuickWidget(&w);
+    SettingsController sc;
 
     QQuickStyle::setStyle("Basic");
     a.setWindowIcon(QIcon(":/resources/dolphin.png"));
@@ -32,5 +35,9 @@ int main(int argc, char *argv[])
 
     w.setCentralWidget(qmlWidget);
     w.show();
+
+    sc.changeRamSlider(qmlWidget);
+    sc.registerSysButtonHandlers(qmlWidget, &w);
+
     return QApplication::exec();
 }

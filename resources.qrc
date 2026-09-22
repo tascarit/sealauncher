@@ -5,6 +5,6 @@
         <file>resources/dolphin.png</file>
         <file>resources/wheat.png</file>
         <file>resources/x-button.png</file>
-        <file>fonts/Minecraft.ttf</file>
+        <file>fonts/minecraft.ttf</file>
     </qresource>
 </RCC>
