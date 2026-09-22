@@ -2,5 +2,9 @@
     <qresource prefix="/">
         <file>resources/background.webm</file>
         <file>qml/Main.qml</file>
+        <file>resources/dolphin.png</file>
+        <file>resources/wheat.png</file>
+        <file>resources/x-button.png</file>
+        <file>fonts/Minecraft.ttf</file>
     </qresource>
 </RCC>
