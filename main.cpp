@@ -1,4 +1,4 @@
-#include "mainwindow.h"
+#include "SettingsManager.h"
 
 #include <QApplication>
 #include <QWidget>
@@ -7,6 +7,7 @@
 #include <QQuickStyle>
 #include <QFile>
 #include <QStatusBar>
+#include <QQmlContext>
 
 #include "SettingsController.h"
 
@@ -19,8 +20,8 @@ int main(int argc, char *argv[])
 #endif
 
     QApplication a(argc, argv);
-    MainWindow w;
     QQuickView view;
+    SettingsManager sm;
     SettingsController sc;
 
     QQuickStyle::setStyle("Basic");
@@ -34,6 +35,7 @@ int main(int argc, char *argv[])
     view.setFlags(Qt::Window | Qt::FramelessWindowHint |
                   Qt::WindowMinimizeButtonHint | Qt::WindowSystemMenuHint);
     view.setIcon(QIcon(":/resources/dolphin.png"));
+    view.rootContext()->setContextProperty("settings", &sm);
 
     view.setSource(QUrl("qrc:/qml/Main.qml"));
     view.show();

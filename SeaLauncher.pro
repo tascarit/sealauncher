@@ -10,15 +10,14 @@ QMAKE_CXXFLAGS += -fstack-protector-all
 QMAKE_LFLAGS += -fstack-protector-all
 
 SOURCES += \
-    main.cpp \
-    mainwindow.cpp
+    SettingsManager.cpp \
+    main.cpp
 
 HEADERS += \
     SettingsController.h \
-    mainwindow.h
+    SettingsManager.h
 
-FORMS += \
-    mainwindow.ui
+FORMS +=
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin

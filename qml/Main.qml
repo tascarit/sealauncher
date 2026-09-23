@@ -58,6 +58,10 @@ Item {
                 Layout.alignment: Qt.AlignVCenter
             }
 
+            Item {
+                Layout.fillWidth: true
+            }
+
             component SysButton : Button {
                 id: sysBtn
                 property color hoverColor: Qt.rgba(1, 1, 1, 0.1)
@@ -295,6 +299,8 @@ Item {
                     color: "#FFFFFF"
                     font.pixelSize: 14
                     selectByMouse: true
+                    text: settings.username
+                    onTextEdited: settings.username = text
 
                     maximumLength: 16
 
@@ -307,8 +313,6 @@ Item {
                         Behavior on color { ColorAnimation { duration: 150 } }
                         Behavior on border.color { ColorAnimation { duration: 150 } }
                     }
-
-                    onTextChanged: console.log("Текущий никнейм:", text)
                 }
 
                 Button {
@@ -322,7 +326,7 @@ Item {
                         anchors.centerIn: parent
 
                         Image {
-                            source: "qrc:/icons/settings.svg"
+                            source: "qrc:/icons/gear.png"
                             sourceSize.width: 16
                             sourceSize.height: 16
                             opacity: settingsButton.hovered ? 1.0 : 0.7
@@ -353,6 +357,23 @@ Item {
 
                     onClicked: root.settingsOpen = !root.settingsOpen
                 }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                height: 1
+                color: Qt.rgba(1, 1, 1, 0.1)
+                Layout.topMargin: 5
+                Layout.bottomMargin: 5
+            }
+
+            Text {
+                text: "v" + settings.version
+                color: Qt.rgba(1, 1, 1, 0.4)
+                font.pixelSize: 11
+                font.bold: true
+                font.letterSpacing: 0.5
+                Layout.fillWidth: true
             }
         }
     }
@@ -654,8 +675,10 @@ Item {
                             from: 2048
                             to: 4096
                             stepSize: 1024
-                            value: 4096
+                            value: settings.ramMb
                             live: true
+
+                            onMoved: settings.ramMb = value
 
                             background: Rectangle {
                                 x: ramSlider.leftPadding
@@ -713,8 +736,9 @@ Item {
                             spacing: 8
                             SettingsInput {
                                 id: javaPathInput
-                                text: ""
+                                text: settings.javaPath
                                 placeholderText: "Например C:/Program Files/Java/jdk-17/bin/java.exe"
+                                onTextEdited: settings.javaPath = text
                             }
                             Button {
                                 text: "Обзор"
@@ -739,8 +763,9 @@ Item {
                             spacing: 8
                             SettingsInput {
                                 id: gameDirInput
-                                text: ""
+                                text: settings.gameDir
                                 placeholderText: "Например C:/Users/Clove/AppData/Roaming/.sealauncher"
+                                onTextEdited: settings.gameDir = text
                             }
                             Button {
                                 text: "Обзор"
@@ -763,7 +788,8 @@ Item {
                         Text { text: "Аргументы запуска JVM (Minecraft):"; color: Qt.rgba(1, 1, 1, 0.6); font.pixelSize: 12 }
                         SettingsInput {
                             id: jvmArgsInput
-                            text: ""
+                            text: settings.jvmArgs
+                            onTextEdited: settings.jvmArgs = text
                             placeholderText: "Например: -Xmx4G -XX:+UseG1GC"
                         }
                     }

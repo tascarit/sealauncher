@@ -7,5 +7,6 @@
         <file>fonts/minecraft.ttf</file>
         <file>resources/leftBlur.png</file>
         <file>resources/background_opt.webm</file>
+        <file>resources/gear.png</file>
     </qresource>
 </RCC>

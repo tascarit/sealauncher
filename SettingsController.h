@@ -9,7 +9,6 @@
 #include <QQuickView>
 #include <QMetaMethod>
 #include <QPushButton>
-#include <mainwindow.h>
 #include <Windows.h>
 #include <shobjidl.h>
 
@@ -63,7 +62,10 @@ public:
     }
 
 signals:
-    void setRam(const DWORDLONG number){ if (m_ram != number) { m_ram = number; emit ramChanged(); }}
+    //void setRam(const DWORDLONG number){ if (m_ram != number) { m_ram = number; emit ramChanged(); }}
+    //void ramChanged();
+
+private:
     void setRamNative(){
         MEMORYSTATUSEX mem;
         mem.dwLength = sizeof(MEMORYSTATUSEX);
@@ -72,8 +74,6 @@ signals:
             m_ram = mem.ullTotalPhys / (1024*1024);
         }
     }
-    void ramChanged();
 
-private:
     DWORDLONG m_ram = 4096;
 };
