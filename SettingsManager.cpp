@@ -1,4 +1,5 @@
 #include "SettingsManager.h"
+#include "NewDebug.h"
 
 #include <QStandardPaths>
 #include <QDir>
@@ -6,7 +7,6 @@
 #include <QSaveFile>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QDebug>
 
 namespace fs = std::filesystem;
 
@@ -34,7 +34,7 @@ void SettingsManager::load(){
 
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
-        qDebug() << "Debug: No config file was found, using standard values";
+        newDebug() << "Debug: No config file was found, using standard values";
         m_loading = false;
         return;
     }
@@ -47,12 +47,14 @@ void SettingsManager::load(){
     m_gameDir  = o.value("gameDir").toString(m_gameDir);
     m_jvmArgs  = o.value("jvmArgs").toString(m_jvmArgs);
     m_version = o.value("version").toInt(m_version);
+    m_maxRam = o.value("maxRam").toInt(m_version);
 
     if (m_ramMb < 2048) m_ramMb = 2048;
 
-    qDebug() << "Debug: Settings loaded from: " << path;
+    newDebug() << "Debug: Settings loaded from: " << path;
     m_loading = false;
 
+    emit maxRamChanged();
     emit usernameChanged();
     emit ramMbChanged();
     emit javaPathChanged();
@@ -77,6 +79,7 @@ void SettingsManager::save(){
     o["javaPath"] = m_javaPath;
     o["gameDir"] = m_gameDir;
     o["jvmArgs"] = m_jvmArgs;
+    o["maxRam"] = m_maxRam;
 
     QFile f(path);
 
@@ -86,7 +89,6 @@ void SettingsManager::save(){
     }
 
     f.write(QJsonDocument(o).toJson());
-    qDebug() << "DEBUG: Settings file saved to: " << path;
 }
 
 void SettingsManager::setUsername(const QString &v)
@@ -110,6 +112,14 @@ void SettingsManager::setRamMb(int v)
     if (m_ramMb == v) return;
     m_ramMb = v;
     emit ramMbChanged();
+    save();
+}
+
+void SettingsManager::setMaxRam(int v)
+{
+    if (m_maxRam == v) return;
+    m_maxRam = v;
+    emit maxRamChanged();
     save();
 }
 

@@ -1,3 +1,5 @@
+#pragma once
+
 #ifndef SETTINGSMANAGER_H
 #define SETTINGSMANAGER_H
 #define VERSION 1
@@ -17,6 +19,7 @@ class SettingsManager: public QObject {
     Q_PROPERTY(QString gameDir  READ gameDir  WRITE setGameDir  NOTIFY gameDirChanged)
     Q_PROPERTY(QString jvmArgs  READ jvmArgs  WRITE setJvmArgs  NOTIFY jvmArgsChanged)
     Q_PROPERTY(int     version    READ version    WRITE setVersion    NOTIFY versionChanged)
+    Q_PROPERTY(int     maxRam    READ maxRam    WRITE setMaxRam    NOTIFY maxRamChanged)
 
 public:
     explicit SettingsManager(QObject *parent = nullptr);
@@ -28,6 +31,7 @@ public:
     QString gameDir()  const { return m_gameDir; }
     QString jvmArgs()  const { return m_jvmArgs; }
     int version() const {return m_version;}
+    int     maxRam()    const { return m_maxRam; }
 
     void setUsername(const QString &v);
     void setRamMb(int v);
@@ -35,6 +39,7 @@ public:
     void setGameDir(const QString &v);
     void setJvmArgs(const QString &v);
     void setVersion(int v);
+    void setMaxRam(int v);
 
     Q_INVOKABLE QString configFilePath() const;
 public slots:
@@ -48,6 +53,7 @@ signals:
     void gameDirChanged();
     void jvmArgsChanged();
     void versionChanged();
+    void maxRamChanged();
 
 private:
     QString m_username;
@@ -56,6 +62,7 @@ private:
     QString m_gameDir;
     QString m_jvmArgs;
     int m_version;
+    int m_maxRam;
 
     bool m_loading = false;
 };

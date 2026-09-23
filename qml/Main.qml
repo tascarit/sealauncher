@@ -673,7 +673,7 @@ Item {
                             objectName: "ramSlider"
                             Layout.fillWidth: true
                             from: 2048
-                            to: 4096
+                            to: settings.maxRam
                             stepSize: 1024
                             value: settings.ramMb
                             live: true

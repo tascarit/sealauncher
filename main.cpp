@@ -1,4 +1,5 @@
 #include "SettingsManager.h"
+#include "SettingsController.h"
 
 #include <QApplication>
 #include <QWidget>
@@ -8,8 +9,6 @@
 #include <QFile>
 #include <QStatusBar>
 #include <QQmlContext>
-
-#include "SettingsController.h"
 
 int main(int argc, char *argv[])
 {
@@ -40,7 +39,7 @@ int main(int argc, char *argv[])
     view.setSource(QUrl("qrc:/qml/Main.qml"));
     view.show();
 
-    sc.changeRamSlider(&view);
+    sm.setMaxRam(sc.getNativeRam());
     sc.registerSysButtonHandlers(&view);
 
     return QApplication::exec();

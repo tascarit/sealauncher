@@ -10,10 +10,12 @@ QMAKE_CXXFLAGS += -fstack-protector-all
 QMAKE_LFLAGS += -fstack-protector-all
 
 SOURCES += \
+    NewDebug.cpp \
     SettingsManager.cpp \
     main.cpp
 
 HEADERS += \
+    NewDebug.h \
     SettingsController.h \
     SettingsManager.h
 

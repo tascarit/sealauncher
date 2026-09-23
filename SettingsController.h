@@ -1,10 +1,13 @@
+#pragma once
+
 #ifndef SETTINGSCONTROLLER_H
 #define SETTINGSCONTROLLER_H
 
 #endif // SETTINGSCONTROLLER_H
-#pragma once
+
+#include "NewDebug.h"
+
 #include <QQmlApplicationEngine>
-#include <QDebug>
 #include <QQuickItem>
 #include <QQuickView>
 #include <QMetaMethod>
@@ -18,25 +21,29 @@ public:
     explicit SettingsController(QObject *parent = nullptr) : QObject(parent) {}
 
     DWORDLONG ram() const {return m_ram;}
+    DWORDLONG getNativeRam() {
+        setRamNative();
+        return m_ram;
+    }
     void changeRamSlider(QQuickView* view){
-        qDebug() << "DEBUG: Starting RAM setting process";
+        newDebug() << "DEBUG: Starting RAM setting process";
 
         setRamNative();
-        qDebug() << "DEBUG: Found native ram count - " << m_ram << " MB";
+        newDebug() << "DEBUG: Found native ram count - " << m_ram << " MB";
 
         QObject *root = view->rootObject();
         QObject *slider = root->findChild<QObject*>("ramSlider");
 
         if (slider){
             slider->setProperty("to", (int) m_ram);
-            qDebug() << "DEBUG: Slider \"to\" property set to " << m_ram << " MB";
+            newDebug() << "DEBUG: Slider \"to\" property set to " << m_ram << " MB";
         } else {
-            qDebug() << "WARN: Failed to set slider property. Only 4 GB will be available";
+            newDebug() << "WARN: Failed to set slider property. Only 4 GB will be available";
         }
     }
 
     void registerSysButtonHandlers(QQuickView* view){
-        qDebug() << "DEBUG: Registering system buttons handlers";
+        newDebug() << "DEBUG: Registering system buttons handlers";
 
         QObject *root = view->rootObject();
         QQuickItem *minimizeButton = root->findChild<QQuickItem*>("minimizeButton");
@@ -45,7 +52,7 @@ public:
         QObject::connect(minimizeButton, SIGNAL(clicked()), view, SLOT(showMinimized()));
         QObject::connect(closeButton,    SIGNAL(clicked()), view, SLOT(close()));
 
-        qDebug() << "DEBUG: Registered sys buttons handlers";
+        newDebug() << "DEBUG: Registered sys buttons handlers";
     }
 
     void registerViewConnections(QQuickView* view){
