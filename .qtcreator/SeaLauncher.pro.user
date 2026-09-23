@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE QtCreatorProject>
-<!-- Written by QtCreator 20.0.1, 2026-09-22T21:01:52. -->
+<!-- Written by QtCreator 20.0.1, 2026-09-23T11:56:21. -->
 <qtcreator>
  <data>
   <variable>EnvironmentId</variable>
@@ -217,13 +217,18 @@
      <valuelist type="QVariantList" key="Analyzer.Valgrind.SuppressionFiles"/>
      <valuelist type="QVariantList" key="CustomOutputParsers"/>
      <value type="int" key="PE.EnvironmentAspect.Base">2</value>
-     <value type="UnknownType" key="PE.EnvironmentAspect.Changes"></value>
+     <valuemap type="QVariantMap" key="PE.EnvironmentAspect.Changes">
+      <value type="QString" key="File"></value>
+      <valuelist type="QVariantList" key="UserItems">
+       <value type="QString">QT_LOGGING_RULSE=&quot;qt.multimedia.*=true&quot;</value>
+      </valuelist>
+     </valuemap>
      <value type="bool" key="PE.EnvironmentAspect.PrintOnRun">false</value>
      <value type="QString" key="PerfRecordArgsId">-e cpu-cycles --call-graph &quot;dwarf,4096&quot; -F 250</value>
      <value type="QString" key="ProjectExplorer.ProjectConfiguration.DisplayName"></value>
      <value type="QString" key="ProjectExplorer.ProjectConfiguration.Id">Qt4ProjectManager.Qt4RunConfiguration:</value>
      <value type="QString" key="ProjectExplorer.RunConfiguration.BuildKey">C:/Users/tscrt/Documents/SeaLauncher/SeaLauncher.pro</value>
-     <value type="bool" key="ProjectExplorer.RunConfiguration.Customized">false</value>
+     <value type="bool" key="ProjectExplorer.RunConfiguration.Customized">true</value>
      <value type="QString" key="ProjectExplorer.RunConfiguration.UniqueId"></value>
      <value type="bool" key="RunConfiguration.UseCppDebuggerAuto">true</value>
      <value type="bool" key="RunConfiguration.UseLibrarySearchPath">true</value>
@@ -256,13 +261,18 @@
     <valuelist type="QVariantList" key="Analyzer.Valgrind.SuppressionFiles"/>
     <valuelist type="QVariantList" key="CustomOutputParsers"/>
     <value type="int" key="PE.EnvironmentAspect.Base">2</value>
-    <value type="UnknownType" key="PE.EnvironmentAspect.Changes"></value>
+    <valuemap type="QVariantMap" key="PE.EnvironmentAspect.Changes">
+     <value type="QString" key="File"></value>
+     <valuelist type="QVariantList" key="UserItems">
+      <value type="QString">QT_LOGGING_RULSE=&quot;qt.multimedia.*=true&quot;</value>
+     </valuelist>
+    </valuemap>
     <value type="bool" key="PE.EnvironmentAspect.PrintOnRun">false</value>
     <value type="QString" key="PerfRecordArgsId">-e cpu-cycles --call-graph &quot;dwarf,4096&quot; -F 250</value>
     <value type="QString" key="ProjectExplorer.ProjectConfiguration.DisplayName"></value>
     <value type="QString" key="ProjectExplorer.ProjectConfiguration.Id">Qt4ProjectManager.Qt4RunConfiguration:</value>
     <value type="QString" key="ProjectExplorer.RunConfiguration.BuildKey">C:/Users/tscrt/Documents/SeaLauncher/SeaLauncher.pro</value>
-    <value type="bool" key="ProjectExplorer.RunConfiguration.Customized">false</value>
+    <value type="bool" key="ProjectExplorer.RunConfiguration.Customized">true</value>
     <value type="QString" key="ProjectExplorer.RunConfiguration.UniqueId"></value>
     <value type="bool" key="RunConfiguration.UseCppDebuggerAuto">true</value>
     <value type="bool" key="RunConfiguration.UseLibrarySearchPath">true</value>

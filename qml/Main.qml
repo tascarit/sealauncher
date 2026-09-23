@@ -8,27 +8,24 @@ import QtQuick.Layouts
 Item {
     id: root
     anchors.fill: parent
-    clip: true
     property bool settingsOpen: false
 
     FontLoader {
         id: minecraftFont
-        source: "qrc:/fonts/minecraft.ttf" // Укажите ваш путь к .ttf файлу шрифта
+        source: "qrc:/fonts/minecraft.ttf"
     }
 
     Video {
         objectName: "background"
         id: backgroundVideo
-        source: "qrc:/resources/background.webm"
+        source: "qrc:/resources/background_opt.webm"
         loops: MediaPlayer.Infinite
         anchors.fill: parent
         clip: true
         muted: true
         fillMode: VideoOutput.PreserveAspectCrop
-
-        Component.onCompleted: {
-            backgroundVideo.play()
-        }
+        autoPlay: true
+        smooth: true
     }
 
     Rectangle {
@@ -39,9 +36,9 @@ Item {
         height: 32
         color: Qt.rgba(0, 0, 0, 0.8)
         z: 100
-        clip: true
 
         MouseArea {
+            acceptedButtons: Qt.LeftButton
             anchors.fill: parent
             onPressed: {
                 if (Window.window) Window.window.startSystemMove()
@@ -59,16 +56,6 @@ Item {
                 sourceSize.width: 16
                 sourceSize.height: 16
                 Layout.alignment: Qt.AlignVCenter
-            }
-
-            Text {
-                text: "SeaLauncher"
-                color: Qt.rgba(1, 1, 1, 0.6)
-                font.pixelSize: 12
-                font.weight: Font.Medium
-                Layout.fillWidth: true
-                Layout.alignment: Qt.AlignVCenter
-                anchors.centerIn: parent
             }
 
             component SysButton : Button {
@@ -122,17 +109,17 @@ Item {
         anchors.bottom: root.bottom
         clip: true
 
-        MultiEffect {
+        Image {
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.topMargin: -32
+            source: "qrc:/resources/leftBlur.png"
             width: root.width
             height: root.height
-            anchors.left: parent.left
-            anchors.top: parent.top
-            autoPaddingEnabled: false
-            blur: 1.0
-            blurEnabled: true
-            blurMax: 48
-            source: backgroundVideo
-            anchors.topMargin: -32
+            cache: true
+            smooth: true
+            asynchronous: true
+            fillMode: Image.PreserveAspectCrop
         }
 
         Rectangle {
@@ -145,9 +132,6 @@ Item {
             anchors.margins: 16
             spacing: 15
 
-            // =========================================================================
-            // 1. ВЕРХНЯЯ ЧАСТЬ: Заголовок лаунчера
-            // =========================================================================
             Text {
                 text: "SeaLauncher"
                 color: "#FFFFFF"
@@ -161,13 +145,9 @@ Item {
                 Layout.bottomMargin: 10
             }
 
-            // =========================================================================
-            // 2. СРЕДНЯЯ ЧАСТЬ: Список сборок с прокруткой
-            // =========================================================================
-            // Заголовок для списка сборок
             Text {
                 text: "ДОСТУПНЫЕ СБОРКИ"
-                color: Qt.rgba(1, 1, 1, 0.4) // Ненавязчивый серый цвет
+                color: Qt.rgba(1, 1, 1, 0.4)
                 font.pixelSize: 11
                 font.bold: true
                 font.letterSpacing: 0.5
@@ -184,16 +164,15 @@ Item {
 
             ScrollView {
                 Layout.fillWidth: true
-                Layout.fillHeight: true // Занимает всё свободное место между верхом и низом
+                Layout.fillHeight: true
                 clip: true
 
                 ListView {
                     id: buildListView
                     model: buildModel
                     spacing: 8
-                    currentIndex: 0 // По умолчанию выбрана первая сборка
+                    currentIndex: 0
 
-                    // Компонент визуального отображения сборки (кнопка)
                     delegate: Button {
                         id: buildButton
                         width: buildListView.width
@@ -205,7 +184,6 @@ Item {
                         topPadding: 0
                         bottomPadding: 0
 
-                        // Свойство для проверки, выбрана ли данная строка
                         property bool isSelected: buildListView.currentIndex === index
 
                         contentItem: RowLayout {
@@ -215,7 +193,6 @@ Item {
                             anchors.centerIn: parent
                             spacing: 12
 
-                            // Иконка сборки (например, логотип мода или дефолтный кубик)
                             Image {
                                 source: model.icon || "qrc:/icons/default_pack.svg"
                                 sourceSize.width: 24
@@ -225,7 +202,6 @@ Item {
                                 Behavior on opacity { NumberAnimation { duration: 120 } }
                             }
 
-                            // Текст с названием и версией сборки
                             ColumnLayout {
                                 spacing: 2
                                 Layout.fillWidth: true
@@ -262,7 +238,6 @@ Item {
                             Behavior on border.color { ColorAnimation { duration: 120 } }
                             Behavior on radius {NumberAnimation {duration: 120 }}
 
-                            // Акцентный маркер слева
                             Rectangle {
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
@@ -283,7 +258,6 @@ Item {
                 }
             }
 
-            // Временные данные для списка (замените на свои или на C++ модель)
             ListModel {
                 id: buildModel
                 ListElement { name: "Krevetka"; version: "1.21.1 (neoforge 21.1.250)"; icon: "qrc:/resources/wheat.png" }
@@ -292,14 +266,13 @@ Item {
 
             Text {
                 text: "НАСТРОЙКИ"
-                color: Qt.rgba(1, 1, 1, 0.4) // Ненавязчивый серый цвет
+                color: Qt.rgba(1, 1, 1, 0.4)
                 font.pixelSize: 11
                 font.bold: true
                 font.letterSpacing: 0.5
                 Layout.fillWidth: true
             }
 
-            // Разделительная линия перед нижним блоком профиля
             Rectangle {
                 Layout.fillWidth: true
                 height: 1
@@ -308,15 +281,11 @@ Item {
                 Layout.bottomMargin: 5
             }
 
-            // =========================================================================
-            // 3. НИЖНЯЯ ЧАСТЬ: Поле ввода имени и кнопка Настройки
-            // =========================================================================
             ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 10
                 Layout.bottomMargin: 5
 
-                // Поле ввода Никнейма
                 TextField {
                     id: usernameInput
                     Layout.fillWidth: true
@@ -327,10 +296,8 @@ Item {
                     font.pixelSize: 14
                     selectByMouse: true
 
-                    // Ограничим длину ника для красоты интерфейса
                     maximumLength: 16
 
-                    // Стилизация поля ввода под общее размытое стекло
                     background: Rectangle {
                         radius: 8
                         color: usernameInput.activeFocus ? Qt.rgba(0, 0, 0, 0.3) : Qt.rgba(0, 0, 0, 0.15)
@@ -344,7 +311,6 @@ Item {
                     onTextChanged: console.log("Текущий никнейм:", text)
                 }
 
-                // Кнопка Настроек
                 Button {
                     id: settingsButton
                     Layout.fillWidth: true
@@ -406,7 +372,6 @@ Item {
             visible: opacity > 0.0
             Behavior on opacity { NumberAnimation { duration: 250 } }
 
-            // --- БЛОК 1: НОВОСТНАЯ ЛЕНТА (Сверху) ---
             ColumnLayout {
                 id: newsSection
                 anchors.top: parent.top
@@ -423,26 +388,22 @@ Item {
                     font.letterSpacing: 1
                 }
 
-                // Горизонтальный ряд карточек новостей
                 GridLayout {
                     rowSpacing: 16
                     columnSpacing: 16
                     columns: 2
                     Layout.alignment: parent
 
-                    // Шаблон новостной карточки
                     component NewsCard : Rectangle {
                         id: card
                         property string titleText: ""
                         property string dateText: ""
-                        property string bgImage: "" // Свойство для пути к картинке
+                        property string bgImage: ""
 
                         Layout.fillWidth: true
                         Layout.preferredHeight: 140
                         radius: 8
-                        color: "#1E1E24" // Базовый цвет, если картинка не загрузится
-                        //border.color: cardMouse.hovered ? "#FFDE7D" : Qt.rgba(1, 1, 1, 0.05)
-                        //border.width: 2
+                        color: "#1E1E24"
                         clip: true
 
                         HoverHandler { id: cardMouse }
@@ -501,13 +462,12 @@ Item {
                             }
                         }
 
-                        // 3. Контент с текстом (лежит на самом верхнем слое)
                         ColumnLayout {
                             anchors.fill: parent
                             anchors.margins: 14
                             spacing: 4
 
-                            Item { Layout.fillHeight: true } // Прижимает текст к нижнему краю карточки
+                            Item { Layout.fillHeight: true }
 
                             Text {
                                 text: card.dateText
@@ -523,7 +483,6 @@ Item {
                                 Layout.fillWidth: true
                                 wrapMode: Text.WordWrap
 
-                                // Текст слегка приподнимается при наведении
                                 Layout.bottomMargin: cardMouse.hovered ? 2 : 0
                                 Behavior on Layout.bottomMargin { NumberAnimation { duration: 150 } }
                             }
@@ -533,7 +492,7 @@ Item {
                     NewsCard {
                         titleText: "Сенсация! Владелец сервера Krevetka захлебнулся спермой!!!"
                         dateText: "22 сентября 2026"
-                        bgImage: "https://avatars.mds.yandex.net/i?id=ef1218e3961c3db0273eef921db68a53_l-5221319-images-thumbs&n=13" // Или прямая ссылка из сети!
+                        bgImage: "https://avatars.mds.yandex.net/i?id=ef1218e3961c3db0273eef921db68a53_l-5221319-images-thumbs&n=13"
                     }
 
                     NewsCard {
@@ -544,7 +503,6 @@ Item {
                 }
             }
 
-            // --- БЛОК 2: ЗОНА ЗАПУСКА С КНОПКОЙ «ИГРАТЬ» (Снизу) ---
             Rectangle {
                 id: launchBar
                 anchors.bottom: parent.bottom
@@ -552,13 +510,11 @@ Item {
                 anchors.right: parent.right
                 height: 90
 
-                // Градиентная подложка, чтобы кнопка выделялась на фоне видео
                 gradient: Gradient {
                     GradientStop { position: 0.0; color: "transparent" }
-                    GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.6) } // Плавное затемнение к низу
+                    GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.6) }
                 }
 
-                // Пиксельная зеленая кнопка ИГРАТЬ (В стиле Minecraft)
                 Button {
                     id: playButton
                     anchors.centerIn: parent
@@ -571,12 +527,10 @@ Item {
                     contentItem: Item {
                         anchors.fill: parent
 
-                        // Объемный текст с черной тенью (каноничный стиль Minecraft GUI)
                         Text {
                             text: "ИГРАТЬ"
                             color: playButton.hovered ? "#000000" : "#2e2e2e"
 
-                            // ИСПОЛЬЗУЕМ ЗАГРУЖЕННЫЙ ШРИФТ MINECRAFT
                             font.family: minecraftFont.name
                             font.pixelSize: 18
 
@@ -593,21 +547,17 @@ Item {
                         }
                     }
 
-                    // Объемный 3D-рельеф кнопки (Торцы светлее, низ темнее)
                     background: Rectangle {
                         id: btnBg
-                        radius: 2 // Маленькое скругление для сохранения пиксельного стиля
+                        radius: 2
 
-                        // Натуральный зеленый цвет Minecraft Launcher: #3C8527, ховер: #479A2F
                         color: playButton.down
                             ? "#2E671E"
                             : (playButton.hovered ? "#479A2F" : "#3C8527")
 
-                        // Границы (светлый верх, темный низ для 3D пиксель-эффекта)
                         border.color: playButton.down ? "#1A3D11" : "#55B635"
                         border.width: 2
 
-                        // Имитация глубокой тени кнопки снизу
                         Rectangle {
                             anchors.left: parent.left
                             anchors.right: parent.right
@@ -631,13 +581,11 @@ Item {
             id: settingsPanel
             anchors.top: parent.top
             anchors.bottom: parent.bottom
-            anchors.right: parent.right // Прижимаем к правому краю
+            anchors.right: parent.right
 
-            // Динамическая ширина: если флаг true — растягивается на всю область, если false — сжимается в 0
             width: root.settingsOpen ? parent.width : 0
-            clip: true // Обрезает внутренний контент, когда панель скрыта
+            clip: true
 
-            // Плавный эффект выезжающей шторки
             Behavior on width {
                 NumberAnimation { duration: 300; easing.type: Easing.OutCubic }
             }
@@ -645,21 +593,20 @@ Item {
             MultiEffect {
                 width: root.width
                 height: root.height
-                // Сдвигаем текстуру эффекта влево, так как панель находится в правой части root
                 anchors.right: parent.right
                 anchors.top: parent.top
-                anchors.topMargin: -32 // Компенсируем высоту шапки
+                anchors.topMargin: -32
                 autoPaddingEnabled: false
                 blur: 1.0
                 blurEnabled: true
-                blurMax: 48
+                blurMax: 32
                 source: backgroundVideo
+                visible: root.settingsOpen
             }
 
-            // Внутренний визуальный контейнер настроек
             Rectangle {
                 anchors.fill: parent
-                color: Qt.rgba(0, 0, 0, 0.4) // Темное стекло
+                color: Qt.rgba(0, 0, 0, 0.4)
                 anchors.margins: 10
                 radius: 8
                 border.color: Qt.rgba(1, 1, 1, 0.05)
@@ -670,7 +617,6 @@ Item {
                     anchors.margins: 20
                     spacing: 18
 
-                    // --- ЗАГОЛОВОК ---
                     Text {
                         text: "Настройки лаунчера"
                         color: "#FFFFFF"
@@ -685,7 +631,6 @@ Item {
                         Layout.bottomMargin: 5
                     }
 
-                    // --- НАСТРОЙКА 1: ВЫДЕЛЕНИЕ ОЗУ (Исправленный слайдер) ---
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 6
@@ -712,7 +657,6 @@ Item {
                             value: 4096
                             live: true
 
-                            // Красивая кастомная полоса без белых просветов по бокам
                             background: Rectangle {
                                 x: ramSlider.leftPadding
                                 y: ramSlider.topPadding + ramSlider.availableHeight / 2 - height / 2
@@ -723,7 +667,6 @@ Item {
                                 radius: 2
                                 color: Qt.rgba(1, 1, 1, 0.1)
 
-                                // Заполненная часть (синий прогресс)
                                 Rectangle {
                                     width: ramSlider.visualPosition * parent.width
                                     height: parent.height
@@ -732,7 +675,6 @@ Item {
                                 }
                             }
 
-                            // Кастомный круглый ползунок (Handle)
                             handle: Rectangle {
                                 x: ramSlider.leftPadding + ramSlider.visualPosition * (ramSlider.availableWidth - width)
                                 y: ramSlider.topPadding + ramSlider.availableHeight / 2 - height / 2
@@ -747,7 +689,6 @@ Item {
                         }
                     }
 
-                    // Шаблон для текстовых полей ввода в настройках
                     component SettingsInput : TextField {
                         id: input
                         Layout.fillWidth: true
@@ -764,7 +705,6 @@ Item {
                         }
                     }
 
-                    // --- НАСТРОЙКА 2: ВЫБОР JAVA ---
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 6
@@ -791,7 +731,6 @@ Item {
                         }
                     }
 
-                    // --- НАСТРОЙКА 3: ДИРЕКТОРИЯ СБОРКИ ---
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 6
@@ -818,7 +757,6 @@ Item {
                         }
                     }
 
-                    // --- НАСТРОЙКА 4: АРГУМЕНТЫ MINECRAFT ---
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 6
@@ -830,9 +768,8 @@ Item {
                         }
                     }
 
-                    Item { Layout.fillHeight: true } // Сдвигает всё меню наверх
+                    Item { Layout.fillHeight: true }
 
-                    // --- СТИЛЬНАЯ КНОПКА «СОХРАНИТЬ И ЗАКРЫТЬ» ---
                     Button {
                         id: saveSettingsButton
                         text: "Сохранить изменения"
@@ -854,12 +791,10 @@ Item {
 
                         background: Rectangle {
                             radius: 6
-                            // При наведении становится ярче, при клике темнеет
                             color: saveSettingsButton.down
                                 ? "#BDB386"
                                 : (saveSettingsButton.hovered ? "#FFF8DB" : "#FFF1BA")
 
-                            // Легкое свечение рамки при наведении
                             border.color: saveSettingsButton.hovered ? "#FFFFFF" : "transparent"
                             border.width: 1
 
@@ -867,7 +802,7 @@ Item {
                         }
 
                         onClicked: {
-                            root.settingsOpen = false // Закрываем шторку
+                            root.settingsOpen = false
                             console.log("Сохранено ОЗУ:", ramSlider.value, "МБ")
                             console.log("Аргументы JVM:", jvmArgsInput.text)
                         }

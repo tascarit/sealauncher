@@ -6,23 +6,26 @@
 #include <QQmlApplicationEngine>
 #include <QDebug>
 #include <QQuickItem>
-#include <QQuickWidget>
+#include <QQuickView>
 #include <QMetaMethod>
 #include <QPushButton>
 #include <mainwindow.h>
 #include <Windows.h>
+#include <shobjidl.h>
 
 class SettingsController: public QObject {
-
+    Q_OBJECT
 public:
+    explicit SettingsController(QObject *parent = nullptr) : QObject(parent) {}
+
     DWORDLONG ram() const {return m_ram;}
-    void changeRamSlider(QQuickWidget* widget){
+    void changeRamSlider(QQuickView* view){
         qDebug() << "DEBUG: Starting RAM setting process";
 
         setRamNative();
         qDebug() << "DEBUG: Found native ram count - " << m_ram << " MB";
 
-        QObject *root = widget->rootObject();
+        QObject *root = view->rootObject();
         QObject *slider = root->findChild<QObject*>("ramSlider");
 
         if (slider){
@@ -33,17 +36,30 @@ public:
         }
     }
 
-    void registerSysButtonHandlers(QQuickWidget* widget, MainWindow* wnd){
+    void registerSysButtonHandlers(QQuickView* view){
         qDebug() << "DEBUG: Registering system buttons handlers";
 
-        QObject *root = widget->rootObject();
+        QObject *root = view->rootObject();
         QQuickItem *minimizeButton = root->findChild<QQuickItem*>("minimizeButton");
         QQuickItem *closeButton = root->findChild<QQuickItem*>("closeButton");
 
-        QObject::connect(minimizeButton, SIGNAL(clicked()), wnd, SLOT(showMinimized()));
-        QObject::connect(closeButton, SIGNAL(clicked()), wnd, SLOT(close()));
+        QObject::connect(minimizeButton, SIGNAL(clicked()), view, SLOT(showMinimized()));
+        QObject::connect(closeButton,    SIGNAL(clicked()), view, SLOT(close()));
 
         qDebug() << "DEBUG: Registered sys buttons handlers";
+    }
+
+    void registerViewConnections(QQuickView* view){
+
+
+        QQuickItem* m_backgroundVideo = view->rootObject()->findChild<QQuickItem*>("background");
+
+        QObject::connect(view, &QWindow::visibilityChanged, [&](QWindow::Visibility v){
+            const bool run = (v == QWindow::Windowed || v == QWindow::Maximized ||
+                              v == QWindow::FullScreen);
+            QMetaObject::invokeMethod(m_backgroundVideo, run ? "play" : "stop",
+                                      Qt::QueuedConnection);
+        });
     }
 
 signals:

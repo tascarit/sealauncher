@@ -1,10 +1,11 @@
 <RCC>
     <qresource prefix="/">
-        <file>resources/background.webm</file>
         <file>qml/Main.qml</file>
         <file>resources/dolphin.png</file>
         <file>resources/wheat.png</file>
         <file>resources/x-button.png</file>
         <file>fonts/minecraft.ttf</file>
+        <file>resources/leftBlur.png</file>
+        <file>resources/background_opt.webm</file>
     </qresource>
 </RCC>

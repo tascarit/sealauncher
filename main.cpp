@@ -12,32 +12,34 @@
 
 int main(int argc, char *argv[])
 {
-    QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+
+#ifdef Q_OS_WIN
+    SetCurrentProcessExplicitAppUserModelID(L"SeaLauncher");
+#endif
 
     QApplication a(argc, argv);
     MainWindow w;
-    QQuickWidget *qmlWidget = new QQuickWidget(&w);
+    QQuickView view;
     SettingsController sc;
 
     QQuickStyle::setStyle("Basic");
     a.setWindowIcon(QIcon(":/resources/dolphin.png"));
     a.setApplicationName(QString("SeaLauncher"));
 
-    w.setWindowTitle(QString("SeaLauncher"));
-    w.setWindowFlags(Qt::FramelessWindowHint);
-    w.setMinimumSize(QSize(900, 800));
-    w.setMaximumSize(QSize(900, 800));
-    w.statusBar()->hide();
+    view.setResizeMode(QQuickView::SizeRootObjectToView);
+    view.setMinimumSize(QSize(900, 800));
+    view.setMaximumSize(QSize(900, 800));
+    view.setTitle("SeaLauncher");
+    view.setFlags(Qt::Window | Qt::FramelessWindowHint |
+                  Qt::WindowMinimizeButtonHint | Qt::WindowSystemMenuHint);
+    view.setIcon(QIcon(":/resources/dolphin.png"));
 
-    qmlWidget->setSource(QUrl("qrc:/qml/Main.qml"));
-    qmlWidget->setResizeMode(QQuickWidget::SizeRootObjectToView);
-    qmlWidget->setAttribute(Qt::WA_OpaquePaintEvent);
+    view.setSource(QUrl("qrc:/qml/Main.qml"));
+    view.show();
 
-    w.setCentralWidget(qmlWidget);
-    w.show();
-
-    sc.changeRamSlider(qmlWidget);
-    sc.registerSysButtonHandlers(qmlWidget, &w);
+    sc.changeRamSlider(&view);
+    sc.registerSysButtonHandlers(&view);
 
     return QApplication::exec();
 }
