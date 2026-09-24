@@ -7,8 +7,84 @@
 #include <QSaveFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
 
 namespace fs = std::filesystem;
+
+bool SettingsManager::isValidJavaExecutable(const QString& path)
+{
+    if (path.isEmpty()) return false;
+    QFileInfo fi(path);
+    if (!fi.exists() || !fi.isFile()) return false;
+
+    QProcess p;
+    p.start(path, {"-version"});
+    if (!p.waitForFinished(3000)) return false;
+    QString out = QString::fromLocal8Bit(p.readAllStandardError())
+                  + QString::fromLocal8Bit(p.readAllStandardOutput());
+    return out.contains("version", Qt::CaseInsensitive);
+}
+
+QString SettingsManager::detectJavaPath() const
+{
+    const QStringList envVars = {"JAVA_HOME", "JDK_HOME", "JRE_HOME"};
+    for (const QString& var : envVars) {
+        QString base = qEnvironmentVariable(var.toUtf8().constData());
+        if (base.isEmpty()) continue;
+        QString exe = base + "/bin/java" + ".exe";
+        if (isValidJavaExecutable(exe)) return exe;
+    }
+
+    QString fromPath = QStandardPaths::findExecutable("java");
+    if (!fromPath.isEmpty() && isValidJavaExecutable(fromPath))
+        return fromPath;
+
+    QStringList searchRoots;
+    searchRoots << "C:/Program Files/Java"
+                << "C:/Program Files/Eclipse Adoptium"
+                << "C:/Program Files/Microsoft"
+                << "C:/Program Files/BellSoft"
+                << "C:/Program Files/Amazon Corretto"
+                << "C:/Program Files/Zulu"
+                << "C:/Program Files/Common Files/Oracle/Java"
+                << "C:/Program Files/Oracle";
+
+    QStringList candidates;
+    for (const QString& root : searchRoots) {
+        QDir r(root);
+        if (!r.exists()) continue;
+        for (const QFileInfo& sub : r.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+            QString exe = sub.absoluteFilePath() + "/bin/java" + ".exe";
+            candidates << exe;
+        }
+    }
+
+    struct Cand { QString path; int major; };
+    QList<Cand> valid;
+    for (const QString& c : candidates) {
+        if (!isValidJavaExecutable(c)) continue;
+        QProcess p;
+        p.start(c, {"-version"});
+        p.waitForFinished(2000);
+        QString out = QString::fromLocal8Bit(p.readAllStandardError());
+        QRegularExpression re(R"("(\d+)(?:\.(\d+))?)");
+        auto m = re.match(out);
+        int major = 0;
+        if (m.hasMatch()) {
+            major = m.captured(1).toInt();
+            if (major == 1 && m.captured(2).length() > 0)
+                major = m.captured(2).toInt(); // "1.8" → 8
+        }
+        valid << Cand{c, major};
+    }
+
+    if (valid.isEmpty()) return "";
+
+    std::sort(valid.begin(), valid.end(), [](const Cand& a, const Cand& b){
+        return a.major > b.major;
+    });
+    return valid.first().path;
+}
 
 void SettingsManager::CreateTemplateFile(){
     const QString path = configFilePath();
@@ -19,11 +95,11 @@ void SettingsManager::CreateTemplateFile(){
     QJsonObject o;
     o["version"] = 1;
     o["username"] = "";
-    o["ramMb"] = 4;
+    o["ramMb"] = 4096;
     o["javaPath"] = "";
-    o["gameDir"] = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/versions";
+    o["gameDir"] = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/modpacks";
     o["jvmArgs"] = "";
-    o["maxRam"] = 4;
+    o["maxRam"] = 4096;
 
     QFile f(path);
 
@@ -55,6 +131,13 @@ void SettingsManager::load(){
     const QString path = configFilePath();
     const QString dir = QFileInfo(path).absolutePath();
 
+    auto getPaths = [this](){
+        if (m_javaPath == "")
+            m_javaPath = detectJavaPath();
+        if (m_gameDir == "")
+            m_gameDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/modpacks";
+    };
+
     QDir().mkpath(dir);
 
     QFile f(path);
@@ -62,6 +145,7 @@ void SettingsManager::load(){
         CreateTemplateFile();
         f.open(QIODevice::ReadOnly);
         newDebug() << "Debug: No config file was found, using standard values";
+        getPaths();
         m_loading = false;
         return;
     }
@@ -80,6 +164,8 @@ void SettingsManager::load(){
 
     newDebug() << "Debug: Settings loaded from: " << path;
     m_loading = false;
+
+    getPaths();
 
     emit maxRamChanged();
     emit usernameChanged();

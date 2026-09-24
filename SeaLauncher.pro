@@ -18,6 +18,7 @@ SOURCES += \
 HEADERS += \
     JsonUtilities.h \
     NewDebug.h \
+    QmlHandler.h \
     SettingsController.h \
     SettingsManager.h \
     minecrafthandler.h
@@ -30,7 +31,9 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
 
 DISTFILES += \
-    qml/Main.qml
+    qml/ErrorDialog.qml \
+    qml/ProgressPanel.qml \
+    qml/Main.qml \
 
 RESOURCES += \
     resources.qrc

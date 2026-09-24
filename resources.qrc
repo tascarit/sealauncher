@@ -8,5 +8,7 @@
         <file>resources/leftBlur.png</file>
         <file>resources/background_opt.webm</file>
         <file>resources/gear.png</file>
+        <file>qml/ErrorDialog.qml</file>
+        <file>qml/ProgressPanel.qml</file>
     </qresource>
 </RCC>

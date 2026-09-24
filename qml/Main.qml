@@ -257,7 +257,7 @@ Item {
 
                         onClicked: {
                             buildListView.currentIndex = index
-                            minecraftHandler.reCheckBuilds(model.name)
+                            minecraftHandler.reCheckBuilds(model.name, model.v, model.loader)
                         }
 
                     }
@@ -266,8 +266,8 @@ Item {
 
             ListModel {
                 id: buildModel
-                ListElement { name: "Krevetka"; version: "1.21.1 (neoforge 21.1.250)"; icon: "qrc:/resources/wheat.png" }
-                ListElement { name: "Test"; version: "1.21.1 (neoforge 21.1.250)"; icon: "qrc:/icons/vanilla.svg" }
+                ListElement { name: "Krevetka"; version: "1.21.1 (neoforge 21.1.250)"; icon: "qrc:/resources/wheat.png"; v: "21.1.250"; loader: "neoforge" }
+                ListElement { name: "Test"; version: "1.21.1 (neoforge 21.1.250)"; icon: "qrc:/icons/vanilla.svg"; v: "1.12.2"; loader: "forge" }
             }
 
             Text {
@@ -753,6 +753,10 @@ Item {
                                     color: parent.hovered ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(1, 1, 1, 0.04)
                                     border.color: Qt.rgba(1, 1, 1, 0.1)
                                 }
+                                onClicked: {
+                                    let path = settingsController.pickJavaExecutable(settings.javaPath)
+                                    if (path !== "") settings.javaPath = path
+                                }
                             }
                         }
                     }
@@ -779,6 +783,10 @@ Item {
                                     radius: 6
                                     color: parent.hovered ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(1, 1, 1, 0.04)
                                     border.color: Qt.rgba(1, 1, 1, 0.1)
+                                }
+                                onClicked: {
+                                    let path = settingsController.pickDirectory(settings.gameDir)
+                                    if (path !== "") settings.gameDir = path
                                 }
                             }
                         }
@@ -839,4 +847,41 @@ Item {
             }
         }
     }
+
+    ProgressPanel {
+        id: progressPanel
+        onCancelled: progressPanel.close()
+    }
+
+    ErrorDialog {
+        id: errorDialog
+        //onRetried: minecraftHandler.retryLastOperation()
+        onClosed: console.log("Ошибка закрыта")
+    }
+
+    Connections {
+        target: qmlHandler
+
+        function onInstallProgress(stage, details, progress) {
+            progressPanel.title = "Установка сборки"
+            progressPanel.stage = stage
+            progressPanel.details = details
+
+            if (progress < 0) {
+                progressPanel.indeterminate = true
+            } else {
+                progressPanel.indeterminate = false
+                progressPanel.progress = progress
+            }
+
+            if (progressPanel.opacity < 1.0) progressPanel.open()
+        }
+
+        function onInstallError(title, message, details, canRetry) {
+            progressPanel.close()
+            errorDialog.show(title, message, details, canRetry)
+        }
+    }
 }
+
+

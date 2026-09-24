@@ -67,4 +67,7 @@ private:
     int m_maxRam;
 
     bool m_loading = false;
+
+    QString detectJavaPath() const;
+    static bool isValidJavaExecutable(const QString& path);
 };

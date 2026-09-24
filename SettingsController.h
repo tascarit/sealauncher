@@ -14,6 +14,7 @@
 #include <QPushButton>
 #include <Windows.h>
 #include <shobjidl.h>
+#include <QFileDialog>
 
 class SettingsController: public QObject {
     Q_OBJECT
@@ -68,9 +69,36 @@ public:
         });
     }
 
-signals:
-    //void setRam(const DWORDLONG number){ if (m_ram != number) { m_ram = number; emit ramChanged(); }}
-    //void ramChanged();
+    Q_INVOKABLE QString pickJavaExecutable(const QString& startDir = QString())
+    {
+        QString filter =
+        QObject::tr("*.exe;;Все файлы (*.*)");
+
+        QFileDialog dlg(nullptr, tr("Выберите исполняемый файл Java"));
+        dlg.setFileMode(QFileDialog::ExistingFile);
+        dlg.setNameFilter(filter);
+        dlg.setOption(QFileDialog::DontUseNativeDialog, false);
+        dlg.setWindowModality(Qt::ApplicationModal);
+        if (!startDir.isEmpty()) dlg.setDirectory(startDir);
+
+        if (dlg.exec() != QDialog::Accepted) return QString();
+        const QStringList sel = dlg.selectedFiles();
+        return sel.isEmpty() ? QString() : sel.first();
+    }
+
+    Q_INVOKABLE QString pickDirectory(const QString& startDir = QString())
+    {
+        QFileDialog dlg(nullptr, tr("Выберите директорию"));
+        dlg.setFileMode(QFileDialog::Directory);
+        dlg.setOption(QFileDialog::ShowDirsOnly, true);
+        dlg.setOption(QFileDialog::DontUseNativeDialog, false);
+        dlg.setWindowModality(Qt::ApplicationModal);
+        if (!startDir.isEmpty()) dlg.setDirectory(startDir);
+
+        if (dlg.exec() != QDialog::Accepted) return QString();
+        const QStringList sel = dlg.selectedFiles();
+        return sel.isEmpty() ? QString() : sel.first();
+    }
 
 private:
     void setRamNative(){

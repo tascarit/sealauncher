@@ -1,6 +1,7 @@
 #include "SettingsManager.h"
 #include "SettingsController.h"
 #include "minecrafthandler.h"
+#include "QmlHandler.h"
 
 #include <QApplication>
 #include <QWidget>
@@ -10,6 +11,7 @@
 #include <QFile>
 #include <QStatusBar>
 #include <QQmlContext>
+#include <QTimer>
 
 int main(int argc, char *argv[])
 {
@@ -21,16 +23,15 @@ int main(int argc, char *argv[])
 
     QApplication a(argc, argv);
     QQuickView view;
-    SettingsManager sm;
-    SettingsController sc;
-    MinecraftHandler mh;
 
     QQuickStyle::setStyle("Basic");
     a.setWindowIcon(QIcon(":/resources/dolphin.png"));
     a.setApplicationName(QString("SeaLauncher"));
 
-    mh.Initialize(&view);
-    mh.reCheckBuilds(QString("Krevetka"));
+    SettingsManager sm;
+    SettingsController sc;
+    MinecraftHandler mh;
+    QmlHandler q;
 
     view.setResizeMode(QQuickView::SizeRootObjectToView);
     view.setMinimumSize(QSize(900, 800));
@@ -41,9 +42,14 @@ int main(int argc, char *argv[])
     view.setIcon(QIcon(":/resources/dolphin.png"));
     view.rootContext()->setContextProperty("settings", &sm);
     view.rootContext()->setContextProperty("minecraftHandler", &mh);
+    view.rootContext()->setContextProperty("qmlHandler", &q);
+    view.rootContext()->setContextProperty("settingsController", &sc);
 
     view.setSource(QUrl("qrc:/qml/Main.qml"));
     view.show();
+
+    mh.Initialize(&view, &q, &sm);
+    mh.reCheckBuilds(QString("Krevetka"), QString("21.1.250"), QString("neoforge"));
 
     sm.setMaxRam(sc.getNativeRam());
     sc.registerSysButtonHandlers(&view);
