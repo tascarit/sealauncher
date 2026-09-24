@@ -1,5 +1,6 @@
 #include "SettingsManager.h"
 #include "SettingsController.h"
+#include "minecrafthandler.h"
 
 #include <QApplication>
 #include <QWidget>
@@ -22,10 +23,14 @@ int main(int argc, char *argv[])
     QQuickView view;
     SettingsManager sm;
     SettingsController sc;
+    MinecraftHandler mh;
 
     QQuickStyle::setStyle("Basic");
     a.setWindowIcon(QIcon(":/resources/dolphin.png"));
     a.setApplicationName(QString("SeaLauncher"));
+
+    mh.Initialize(&view);
+    mh.reCheckBuilds(QString("Krevetka"));
 
     view.setResizeMode(QQuickView::SizeRootObjectToView);
     view.setMinimumSize(QSize(900, 800));
@@ -35,6 +40,7 @@ int main(int argc, char *argv[])
                   Qt::WindowMinimizeButtonHint | Qt::WindowSystemMenuHint);
     view.setIcon(QIcon(":/resources/dolphin.png"));
     view.rootContext()->setContextProperty("settings", &sm);
+    view.rootContext()->setContextProperty("minecraftHandler", &mh);
 
     view.setSource(QUrl("qrc:/qml/Main.qml"));
     view.show();

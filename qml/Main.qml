@@ -183,6 +183,7 @@ Item {
                         height: 52
                         hoverEnabled: true
                         flat: true
+                        objectName: isSelected ? "selectedBuild" : ""
 
                         padding: 0
                         topPadding: 0
@@ -213,6 +214,7 @@ Item {
 
                                 Text {
                                     text: model.name
+                                    objectName: "buttonText"
                                     color: "#FFFFFF"
                                     font.pixelSize: 14
                                     font.weight: buildButton.isSelected ? Font.DemiBold : Font.Normal
@@ -255,7 +257,7 @@ Item {
 
                         onClicked: {
                             buildListView.currentIndex = index
-                            console.log("Выбрана сборка:", model.name)
+                            minecraftHandler.reCheckBuilds(model.name)
                         }
 
                     }
@@ -549,7 +551,7 @@ Item {
                         anchors.fill: parent
 
                         Text {
-                            text: "ИГРАТЬ"
+                            text: minecraftHandler.buildExists ? "ИГРАТЬ" : "СКАЧАТЬ"
                             color: playButton.hovered ? "#000000" : "#2e2e2e"
 
                             font.family: minecraftFont.name
@@ -560,7 +562,7 @@ Item {
                             anchors.verticalCenterOffset: 2
                         }
                         Text {
-                            text: "ИГРАТЬ"
+                            text: minecraftHandler.buildExists ? "ИГРАТЬ" : "СКАЧАТЬ"
                             color: "#FFFFFF"
                             font.family: minecraftFont.name
                             font.pixelSize: 18
@@ -592,7 +594,7 @@ Item {
                     }
 
                     onClicked: {
-                        console.log("Запуск выбранной сборки:", buildListView.model.get(buildListView.currentIndex).name)
+                        minecraftHandler.mainButtonClick()
                     }
                 }
             }

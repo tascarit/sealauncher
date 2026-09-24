@@ -41,6 +41,8 @@ public:
     void setVersion(int v);
     void setMaxRam(int v);
 
+    void CreateTemplateFile();
+
     Q_INVOKABLE QString configFilePath() const;
 public slots:
     void load();

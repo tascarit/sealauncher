@@ -10,6 +10,31 @@
 
 namespace fs = std::filesystem;
 
+void SettingsManager::CreateTemplateFile(){
+    const QString path = configFilePath();
+    const QString dir = QFileInfo(path).absolutePath();
+
+    QDir().mkpath(dir);
+
+    QJsonObject o;
+    o["version"] = 1;
+    o["username"] = "";
+    o["ramMb"] = 4;
+    o["javaPath"] = "";
+    o["gameDir"] = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/versions";
+    o["jvmArgs"] = "";
+    o["maxRam"] = 4;
+
+    QFile f(path);
+
+    if (!f.open(QIODevice::WriteOnly)){
+        qWarning() << "ERROR: Failed to open file to save settings";
+        return;
+    }
+
+    f.write(QJsonDocument(o).toJson());
+}
+
 SettingsManager::SettingsManager(QObject *parent)
     :QObject(parent)
 {
@@ -34,6 +59,8 @@ void SettingsManager::load(){
 
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
+        CreateTemplateFile();
+        f.open(QIODevice::ReadOnly);
         newDebug() << "Debug: No config file was found, using standard values";
         m_loading = false;
         return;

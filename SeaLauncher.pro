@@ -12,12 +12,15 @@ QMAKE_LFLAGS += -fstack-protector-all
 SOURCES += \
     NewDebug.cpp \
     SettingsManager.cpp \
-    main.cpp
+    main.cpp \
+    minecrafthandler.cpp
 
 HEADERS += \
+    JsonUtilities.h \
     NewDebug.h \
     SettingsController.h \
-    SettingsManager.h
+    SettingsManager.h \
+    minecrafthandler.h
 
 FORMS +=
 
