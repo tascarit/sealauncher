@@ -49,7 +49,7 @@ int main(int argc, char *argv[])
     view.show();
 
     mh.Initialize(&view, &q, &sm, &sc);
-    mh.reCheckBuilds(QString("Krevetka"), QString("21.1.250"), QString("neoforge"), QString("1.21.1"));
+    mh.reCheckBuilds(QString("Krevetka"), QString("21.1.250"), QString("neoforge"), QString("1.21.1"), QString("https://github.com/tascarit/KrevetkaPack/releases/latest/download/Krevetka.zip"), 1);
 
     sm.setMaxRam(sc.getNativeRam());
     sc.registerSysButtonHandlers(&view);
