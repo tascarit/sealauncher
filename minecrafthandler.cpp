@@ -1,8 +1,5 @@
 #include "minecrafthandler.h"
-#include "JsonUtilities.h"
 #include "NewDebug.h"
-
-#include <QProcess>
 
 QString getVersionsPath(){
     QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -25,10 +22,11 @@ MinecraftHandler::~MinecraftHandler(){
 
 }
 
-void MinecraftHandler::Initialize(QQuickView* v, QmlHandler* _q, SettingsManager* _sm){
+void MinecraftHandler::Initialize(QQuickView* v, QmlHandler* _q, SettingsManager* _sm, SettingsController* _sc){
     view = v;
     q = _q;
     sm = _sm;
+    sc = _sc;
 }
 
 void MinecraftHandler::ensureLauncherProfile(const QString& gameDir)
@@ -63,12 +61,13 @@ void MinecraftHandler::ensureLauncherProfile(const QString& gameDir)
     qDebug() << "[Installer] Создан launcher_profiles.json в" << path;
 }
 
-void MinecraftHandler::reCheckBuilds(const QString& build, const QString& version, const QString& loader){
+void MinecraftHandler::reCheckBuilds(const QString& build, const QString& version, const QString& loader, const QString& mcVer){
     newDebug() << "Rechecking build folder: " << build.toStdString().c_str() << " for: " << "Minecraft v" << version << ", " << loader;
     QString path = getVersionsPath();
     m_buildName = build;
     m_buildVersion = version;
     m_buildLoader = loader;
+    m_mcVersion = mcVer;
 
     QDir().mkpath(path);
 
@@ -87,9 +86,26 @@ void MinecraftHandler::mainButtonClick(){
 
     if (!m_buildExists){
         if (m_buildLoader == "neoforge"){
+            QString gamePath = sm->gameDir() + "/" + m_buildName;
             newDebug() << "DEBUG: Downloading neoforge for " << m_buildVersion;
 
+            connect(this, &MinecraftHandler::installFinished, this, [this, gamePath](){
+                QStringList command = parseNeoforgeJson(gamePath);
+
+                sc->closeProgressPanel(view);
+                launchMinecraft(command);
+            });
+
             downloadNeoforge(m_buildVersion);
+        }
+    } else {
+        if (m_buildLoader == "neoforge"){
+            QString gamePath = sm->gameDir() + "/" + m_buildName;
+            QStringList command = parseNeoforgeJson(gamePath);
+
+            newDebug() << "DEBUG: Starting minecraft on " << m_buildLoader << " " << m_buildVersion;
+
+            launchMinecraft(command);
         }
     }
 }
@@ -294,7 +310,8 @@ QString MinecraftHandler::installNeoforge(const QString& installerPath){
                 QStringLiteral("Установка neoforge завершена!"),
                 "",
                 1.0);
-            parseNeoforgeJson(workingDir);
+
+            emit installFinished();
         } else {
             newDebug() << "Ошибка установки neoforge: " << exitCode;
             emit q->installError("Ошибка", QString("Ошибка установки neoforge. Код выхода: %1").arg(exitCode), "", true);
@@ -313,8 +330,242 @@ QString MinecraftHandler::installNeoforge(const QString& installerPath){
     return workingDir;
 }
 
-QString MinecraftHandler::parseNeoforgeJson(const QString& gamePath){
+QStringList MinecraftHandler::parseNeoforgeJson(const QString& gamePath)
+{
+    QString jsonPath = gamePath + "/versions/neoforge-" + m_buildVersion
+                     + "/neoforge-" + m_buildVersion + ".json";
 
+    QFile f(jsonPath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        newDebug() << "[MC] ERROR: cannot open" << jsonPath;
+        emit q->installError("Ошибка", "Не найден JSON NeoForge", jsonPath, false);
+        return {};
+    }
+
+    QJsonObject json = QJsonDocument::fromJson(f.readAll()).object();
+    f.close();
+
+    QStringList classpathList;
+    const QString librariesDir = gamePath + "/libraries";
+
+    for (const QJsonValue& v : json["libraries"].toArray()) {
+        QJsonObject lib = v.toObject();
+
+        if (lib.contains("rules")) {
+            bool allowed = false;
+            for (const QJsonValue& rv : lib["rules"].toArray()) {
+                QJsonObject rule = rv.toObject();
+                QString action = rule["action"].toString();
+                bool matches = true;
+                if (rule.contains("os")) {
+                    QJsonObject os = rule["os"].toObject();
+                    if (os.contains("name") && os["name"].toString() != "windows")
+                        matches = false;
+                    if (os.contains("arch")) {
+                        const QString arch = os["arch"].toString();
+                        const bool is64 = QSysInfo::currentCpuArchitecture().contains("64");
+                        if ((arch == "x86" && is64) || (arch == "x86_64" && !is64))
+                            matches = false;
+                    }
+                }
+                if (matches) {
+                    allowed = (action == "allow");
+                }
+            }
+            if (!allowed) continue;
+        }
+
+        if (lib.contains("downloads")
+            && lib["downloads"].toObject().contains("artifact")) {
+            QString p = lib["downloads"].toObject()["artifact"]
+                             .toObject()["path"].toString();
+            if (!p.isEmpty())
+                classpathList << QDir(librariesDir).absoluteFilePath(p);
+        }
+    }
+
+    QString mcJar = gamePath + "/versions/" + m_mcVersion
+                  + "/" + m_mcVersion + ".jar";
+    classpathList << mcJar;
+
+    QString classPath = classpathList.join(';');
+
+    QString cpFilePath = gamePath + "/legacyClassPath.txt";
+    {
+        QFile cpFile(cpFilePath);
+        if (!cpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            newDebug() << "[MC] ERROR: cannot write classpath file:" << cpFilePath;
+            emit q->installError("Ошибка", "Не удалось записать classpath", cpFilePath, false);
+            return {};
+        }
+        cpFile.write(classPath.toUtf8());
+        cpFile.close();
+    }
+
+    const QString versionName = QString("%1-neoforge-%2")
+                                    .arg(m_mcVersion, m_buildVersion);
+
+    QHash<QString, QString> vars;
+    vars["${auth_player_name}"]       = sm->username();
+    vars["${auth_uuid}"]              = "00000000-0000-0000-0000-000000000000";
+    vars["${auth_access_token}"]      = "0";
+    vars["${auth_session}"]           = "0";
+    vars["${user_type}"]              = "legacy";
+    vars["${version_name}"]           = versionName;
+    vars["${version_type}"]           = "release";
+    vars["${game_directory}"]         = gamePath;
+    vars["${assets_root}"]            = gamePath + "/assets";
+    vars["${assets_index_name}"]      = m_mcVersion;
+    vars["${natives_directory}"]      = gamePath + "/natives";
+    vars["${library_directory}"]      = librariesDir;
+    vars["${classpath}"]              = classPath;
+    vars["${launcher_name}"]          = "SeaLauncher";
+    vars["${launcher_version}"]       = "1.0";
+    vars["${resolution_width}"]       = "925";
+    vars["${resolution_height}"]      = "530";
+    vars["${game_assets}"]            = gamePath + "/assets";
+    vars["${user_properties}"]        = "{}";
+    vars["${clientid}"]               = "0";
+    vars["${auth_xuid}"]              = "0";
+    vars["${classpath_separator}"]    = ";";
+    vars["${path_separator}"]         = ";";
+    vars["${fml.neoForgeVersion}"]    = m_buildVersion;
+    vars["${fml.mcVersion}"]          = m_mcVersion;
+    vars["${fml.fmlVersion}"]         = "";
+
+    auto substitute = [&vars](QString s) -> QString {
+        for (auto it = vars.constBegin(); it != vars.constEnd(); ++it)
+            s.replace(it.key(), it.value());
+        return s;
+    };
+
+    auto ruleMatches = [](const QJsonObject& rule) -> bool {
+        QJsonObject os = rule.value("os").toObject();
+        bool matches = true;
+        if (os.contains("name") && os["name"].toString() != "windows")
+            matches = false;
+        if (os.contains("arch")) {
+            const QString arch = os["arch"].toString();
+            const bool is64 = QSysInfo::currentCpuArchitecture().contains("64");
+            if ((arch == "x86" && is64) || (arch == "x86_64" && !is64))
+                matches = false;
+        }
+        return matches;
+    };
+
+    auto expandArray = [&substitute, &ruleMatches](const QJsonArray& arr) -> QStringList {
+        QStringList out;
+        for (const QJsonValue& v : arr) {
+            if (v.isString()) {
+                out << substitute(v.toString());
+            } else if (v.isObject()) {
+                QJsonObject obj = v.toObject();
+                QString value = obj.value("value").toString();
+                if (value.isEmpty() && obj.value("value").isArray()) {
+                    for (const QJsonValue& sub : obj["value"].toArray())
+                        out << substitute(sub.toString());
+                    continue;
+                }
+                bool allowed = true;
+                if (obj.contains("rules")) {
+                    allowed = false;
+                    for (const QJsonValue& rv : obj["rules"].toArray()) {
+                        QJsonObject rule = rv.toObject();
+                        if (ruleMatches(rule))
+                            allowed = (rule.value("action").toString() == "allow");
+                    }
+                }
+                if (allowed && !value.isEmpty())
+                    out << substitute(value);
+            }
+        }
+        return out;
+    };
+
+    QStringList jvmArgs;
+    jvmArgs << "-Xmx" + QString::number(sm->ramMb()) + "M";
+    jvmArgs << "-Djava.library.path=" + gamePath + "/natives";
+    jvmArgs << "-DlegacyClassPath=" + classPath;
+
+    if (!sm->jvmArgs().trimmed().isEmpty()) {
+        jvmArgs << sm->jvmArgs().split(' ', Qt::SkipEmptyParts);
+    }
+
+    QJsonObject arguments = json["arguments"].toObject();
+    if (arguments.contains("jvm")) {
+        jvmArgs << expandArray(arguments["jvm"].toArray());
+    }
+
+    QStringList gameArgs;
+    if (arguments.contains("game")) {
+        gameArgs << expandArray(arguments["game"].toArray());
+    } else if (json.contains("minecraftArguments")) {
+        gameArgs << substitute(json["minecraftArguments"].toString())
+                        .split(' ', Qt::SkipEmptyParts);
+    } else {
+        gameArgs << "--username"    << sm->username();
+        gameArgs << "--version"     << versionName;
+        gameArgs << "--gameDir"     << gamePath;
+        gameArgs << "--assetsDir"   << gamePath + "/assets";
+        gameArgs << "--assetIndex"  << m_mcVersion;
+        gameArgs << "--uuid"        << "00000000-0000-0000-0000-000000000000";
+        gameArgs << "--accessToken" << "0";
+        gameArgs << "--userType"    << "legacy";
+    }
+
+    QString mainClass = json["mainClass"].toString("cpw.mods.bootstraplauncher.BootstrapLauncher");
+
+    QStringList fullCommand;
+    fullCommand << jvmArgs;
+    fullCommand << mainClass;
+    fullCommand << gameArgs;
+
+    newDebug() << "[MC] java:" << sm->javaPath();
+    newDebug() << "[MC] classpath entries:" << classpathList.size();
+    newDebug() << "[MC] classpath file:" << cpFilePath;
+    newDebug() << "[MC] mainClass:" << mainClass;
+    newDebug() << "[MC] argv count:" << fullCommand.size();
+
+    return fullCommand;
+}
+
+bool MinecraftHandler::launchMinecraft(const QStringList& command){
+    QString javaPath = sm->javaPath();
+    QProcess* proc = new QProcess(this);
+
+    m_minecraftProcess = proc;
+
+    connect(proc, &QProcess::readyReadStandardOutput, this, [proc](){
+        QString output = QString::fromLocal8Bit(proc->readAllStandardOutput());
+
+        newDebug() << "[Minecraft Process] DEBUG: " << output;
+    });
+
+    connect(proc, &QProcess::readyReadStandardError, this, [proc](){
+        QString error = QString::fromLocal8Bit(proc->readAllStandardError());
+
+        newDebug() << "[Minecraft Process] ERROR: " << error;
+    });
+
+    connect(proc, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus exitStatus){
+       if (exitStatus == QProcess::NormalExit && exitCode == 0){
+           newDebug() << "[Minecraft Process] Process finished normally";
+       } else {
+           newDebug() << QString("[Minecraft Process] ERROR: Process finished with error, exitCode: %1").arg(exitCode);
+
+           emit q->installError("Ошибка", QString("Майнкрафт завершился с ошибкой: %1").arg(exitCode), "", false);
+       }
+    });
+
+    proc->start(javaPath, command);
+
+    if (!proc->waitForStarted(5000)){
+        newDebug() << "[Minecraft Process] ERROR: Didn't start. Probably command error";
+        emit q->installError("Ошибка", "Майнкрафт не запустился, скорее всего ошибка в аргументах запуска.", "", false);
+        return false;
+    }
+
+    return true;
 }
 
 void MinecraftHandler::setBuildExists(bool v){

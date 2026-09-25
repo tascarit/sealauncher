@@ -257,7 +257,7 @@ Item {
 
                         onClicked: {
                             buildListView.currentIndex = index
-                            minecraftHandler.reCheckBuilds(model.name, model.v, model.loader)
+                            minecraftHandler.reCheckBuilds(model.name, model.v, model.loader, model.mcV)
                         }
 
                     }
@@ -266,8 +266,8 @@ Item {
 
             ListModel {
                 id: buildModel
-                ListElement { name: "Krevetka"; version: "1.21.1 (neoforge 21.1.250)"; icon: "qrc:/resources/wheat.png"; v: "21.1.250"; loader: "neoforge" }
-                ListElement { name: "Test"; version: "1.21.1 (neoforge 21.1.250)"; icon: "qrc:/icons/vanilla.svg"; v: "1.12.2"; loader: "forge" }
+                ListElement { name: "Krevetka"; version: "1.21.1 (neoforge 21.1.250)"; icon: "qrc:/resources/wheat.png"; v: "21.1.250"; loader: "neoforge" ; mcV: "1.21.1"}
+                ListElement { name: "Test"; version: "1.21.1 (neoforge 21.1.250)"; icon: "qrc:/icons/vanilla.svg"; v: "1.12.2"; loader: "forge"; mcV: "1.12.2" }
             }
 
             Text {
@@ -850,11 +850,13 @@ Item {
 
     ProgressPanel {
         id: progressPanel
+        objectName: "progressPanel"
         onCancelled: progressPanel.close()
     }
 
     ErrorDialog {
         id: errorDialog
+        objectName: "errorDialog"
         //onRetried: minecraftHandler.retryLastOperation()
         onClosed: console.log("Ошибка закрыта")
     }

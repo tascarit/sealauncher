@@ -48,8 +48,8 @@ int main(int argc, char *argv[])
     view.setSource(QUrl("qrc:/qml/Main.qml"));
     view.show();
 
-    mh.Initialize(&view, &q, &sm);
-    mh.reCheckBuilds(QString("Krevetka"), QString("21.1.250"), QString("neoforge"));
+    mh.Initialize(&view, &q, &sm, &sc);
+    mh.reCheckBuilds(QString("Krevetka"), QString("21.1.250"), QString("neoforge"), QString("1.21.1"));
 
     sm.setMaxRam(sc.getNativeRam());
     sc.registerSysButtonHandlers(&view);

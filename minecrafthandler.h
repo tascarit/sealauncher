@@ -5,6 +5,7 @@
 
 #include "QmlHandler.h"
 #include "SettingsManager.h"
+#include "SettingsController.h"
 
 #include <QObject>
 #include <QQuickItem>
@@ -19,6 +20,8 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QTimer>
+#include <QJsonArray>
+#include <QProcess>
 
 class MinecraftHandler: public QObject
 {
@@ -33,15 +36,17 @@ public:
 
     void setBuildExists(bool);
 
-    void Initialize(QQuickView*, QmlHandler*, SettingsManager*);
+    void Initialize(QQuickView*, QmlHandler*, SettingsManager*, SettingsController*);
 
     QString downloadNeoforge(const QString&);
     QString installNeoforge(const QString&);
-    QString parseNeoforgeJson(const QString&);
+    QStringList parseNeoforgeJson(const QString&);
 
     void ensureLauncherProfile(const QString& gameDir);
 
-    Q_INVOKABLE void reCheckBuilds(const QString&, const QString&, const QString&);
+    bool launchMinecraft(const QStringList&);
+
+    Q_INVOKABLE void reCheckBuilds(const QString&, const QString&, const QString&, const QString&);
     Q_INVOKABLE void mainButtonClick();
 
 signals:
@@ -49,18 +54,23 @@ signals:
 
     void downloadProgress(qint64, qint64);
     void downloadFinished();
+
+    void installFinished();
 private:
     QQuickView *view;
     QmlHandler *q;
     QNetworkAccessManager *m_manager = nullptr;
     SettingsManager *sm = nullptr;
+    SettingsController *sc = nullptr;
 
     bool m_buildExists;
     QString m_buildName;
     QString m_buildLoader;
     QString m_buildVersion;
+    QString m_mcVersion;
     QFile *m_file;
 
+    QProcess* m_minecraftProcess = nullptr;
     QTimer* m_progressThrottle = nullptr;
     QString m_pendingStage;
     QString m_pendingDetails;

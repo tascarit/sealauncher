@@ -69,6 +69,14 @@ public:
         });
     }
 
+    void closeProgressPanel(QQuickView* view){
+        QObject* panel = view->findChild<QObject*>("progressPanel");
+
+        if(panel){
+            QMetaObject::invokeMethod(panel, "close");
+        }
+    }
+
     Q_INVOKABLE QString pickJavaExecutable(const QString& startDir = QString())
     {
         QString filter =
