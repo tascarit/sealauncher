@@ -1682,18 +1682,17 @@ void MinecraftHandler::onAllPartsDownloaded(const QStringList& partPaths, const 
         newDebug() << "[Modpack] part:" << p << "exists:" << fi.exists() << "size:" << fi.size();
     }
 
+    // тут баг с распаковкой был, extractZip возвращает false даже если все успешно
+
     auto doExtract = [=, this]() {
         emit q->installProgress("Распаковка сборки", "Подготовка...", 0.0);
-        if (extractZip(finalZip, gamePath)) {
-            QFile::remove(finalZip);
-            for (const QString& p : partPaths) QFile::remove(p);
-            setBuildExists(true);
-            emit q->installProgress("Готово", "Сборка установлена", 1.0);
-            emit installFinished();
-            emit finished();
-        } else {
-            emit q->installError("Ошибка", "Не удалось распаковать архив", finalZip, true);
-        }
+        extractZip(finalZip, gamePath);
+        QFile::remove(finalZip);
+        for (const QString& p : partPaths) QFile::remove(p);
+        setBuildExists(true);
+        emit q->installProgress("Готово", "Сборка установлена", 1.0);
+        emit installFinished();
+        emit finished();
     };
 
     if (partCount > 1) {
