@@ -15,6 +15,9 @@
 #include <Windows.h>
 #include <shobjidl.h>
 #include <QFileDialog>
+#include <QSystemTrayIcon>
+#include <QMenu>
+#include <QDesktopServices>
 
 class SettingsController: public QObject {
     Q_OBJECT
@@ -26,6 +29,53 @@ public:
         setRamNative();
         return m_ram;
     }
+
+    void setupTrayIcon(QQuickView* view){
+        if (m_tray) return;
+
+        if (!QSystemTrayIcon::isSystemTrayAvailable()) {
+            newDebug() << "[Tray] System tray is not available on this system";
+            return;
+        }
+
+        QIcon icon(":/resources/dolphin.png");
+        if (icon.isNull()) icon = QIcon(":/resources/wheat.png");
+        if (icon.isNull()) icon = QIcon(":/resources/vanilla.png");
+        if (icon.isNull()) icon = QIcon(":/resources/dolphin.png");
+        if (icon.isNull()) {
+            QPixmap pm(32, 32);
+            pm.fill(QColor("#3C8527"));
+            icon = QIcon(pm);
+        }
+
+        m_tray = new QSystemTrayIcon(icon, view);
+        m_tray->setToolTip("SeaLauncher");
+
+        QMenu* menu = new QMenu();
+        QAction* showAction = menu->addAction("Показать лаунчер");
+        QAction* quitAction = menu->addAction("Выход");
+
+        QObject::connect(showAction, &QAction::triggered, view, [view]() {
+            view->show();
+            view->raise();
+            view->requestActivate();
+        });
+        QObject::connect(quitAction, &QAction::triggered, view, [view]() {
+            view->close();
+        });
+        QObject::connect(m_tray, &QSystemTrayIcon::activated, view, [view](QSystemTrayIcon::ActivationReason reason) {
+            if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) {
+                view->show();
+                view->raise();
+                view->requestActivate();
+            }
+        });
+
+        m_tray->setContextMenu(menu);
+        m_tray->show();
+        newDebug() << "[Tray] Tray icon created and shown";
+    }
+
     void changeRamSlider(QQuickView* view){
         newDebug() << "DEBUG: Starting RAM setting process";
 
@@ -119,4 +169,5 @@ private:
     }
 
     DWORDLONG m_ram = 4096;
+    QSystemTrayIcon* m_tray = nullptr;
 };

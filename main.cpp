@@ -2,6 +2,8 @@
 #include "SettingsController.h"
 #include "minecrafthandler.h"
 #include "QmlHandler.h"
+#include "modrinthapi.h"
+#include "localbuildsmanager.h"
 
 #include <QApplication>
 #include <QWidget>
@@ -17,9 +19,7 @@ int main(int argc, char *argv[])
 {
     QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
 
-#ifdef Q_OS_WIN
     SetCurrentProcessExplicitAppUserModelID(L"SeaLauncher");
-#endif
 
     QApplication a(argc, argv);
     QQuickView view;
@@ -32,6 +32,9 @@ int main(int argc, char *argv[])
     SettingsController sc;
     MinecraftHandler mh;
     QmlHandler q;
+    ModrinthApi modrinthApi;
+    LocalBuildsManager localBuildsManager(&sm, &modrinthApi);
+    localBuildsManager.setMinecraftHandler(&mh);
 
     view.setResizeMode(QQuickView::SizeRootObjectToView);
     view.setMinimumSize(QSize(900, 800));
@@ -44,12 +47,27 @@ int main(int argc, char *argv[])
     view.rootContext()->setContextProperty("minecraftHandler", &mh);
     view.rootContext()->setContextProperty("qmlHandler", &q);
     view.rootContext()->setContextProperty("settingsController", &sc);
+    view.rootContext()->setContextProperty("modrinthApi", &modrinthApi);
+    view.rootContext()->setContextProperty("localBuildsManager", &localBuildsManager);
 
     view.setSource(QUrl("qrc:/qml/Main.qml"));
+
+    sc.setupTrayIcon(&view);
+
+    QObject::connect(&mh, &MinecraftHandler::minecraftStarted, [&]() {
+        view.hide();
+    });
+
+    QObject::connect(&mh, &MinecraftHandler::minecraftStopped, [&]() {
+        view.show();
+        view.raise();
+        view.requestActivate();
+    });
+
     view.show();
 
     mh.Initialize(&view, &q, &sm, &sc);
-    mh.reCheckBuilds(QString("Krevetka"), QString("21.1.250"), QString("neoforge"), QString("1.21.1"), QString("https://github.com/tascarit/KrevetkaPack/releases/latest/download/Krevetka.zip"), 1);
+    //mh.reCheckBuilds(QString("Krevetka"), QString("21.1.250"), QString("neoforge"), QString("1.21.1"), QString("https://github.com/tascarit/KrevetkaPack/releases/download/0.1/Krevetka.zip"), 1, "0.1");
 
     sm.setMaxRam(sc.getNativeRam());
     sc.registerSysButtonHandlers(&view);

@@ -7,8 +7,13 @@
         <file>fonts/minecraft.ttf</file>
         <file>resources/leftBlur.png</file>
         <file>resources/background_opt.webm</file>
-        <file>resources/gear.png</file>
         <file>qml/ErrorDialog.qml</file>
         <file>qml/ProgressPanel.qml</file>
+        <file>resources/settings.png</file>
+        <file>resources/trash.png</file>
+        <file>resources/folder.png</file>
+        <file>qml/BuildCreatorDialog.qml</file>
+        <file>resources/discord.png</file>
+        <file>resources/dolphin.ico</file>
     </qresource>
 </RCC>

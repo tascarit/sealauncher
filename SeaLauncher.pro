@@ -1,4 +1,4 @@
-QT += widgets quick multimedia quickcontrols2 quicklayouts quickwidgets
+QT += widgets quick multimedia quickcontrols2 quicklayouts quickwidgets core5compat
 
 CONFIG += c++17
 
@@ -12,8 +12,11 @@ QMAKE_LFLAGS += -fstack-protector-all
 SOURCES += \
     NewDebug.cpp \
     SettingsManager.cpp \
+    localbuildsmanager.cpp \
     main.cpp \
-    minecrafthandler.cpp
+    minecrafthandler.cpp \
+    moddependencyresolver.cpp \
+    modrinthapi.cpp
 
 HEADERS += \
     JsonUtilities.h \
@@ -21,7 +24,10 @@ HEADERS += \
     QmlHandler.h \
     SettingsController.h \
     SettingsManager.h \
-    minecrafthandler.h
+    localbuildsmanager.h \
+    minecrafthandler.h \
+    moddependencyresolver.h \
+    modrinthapi.h
 
 FORMS +=
 
@@ -31,9 +37,12 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
 
 DISTFILES += \
+    qml/BuildCreatorDialog.qml \
     qml/ErrorDialog.qml \
     qml/ProgressPanel.qml \
     qml/Main.qml \
 
 RESOURCES += \
     resources.qrc
+
+RC_ICONS = resources/dolphin.ico

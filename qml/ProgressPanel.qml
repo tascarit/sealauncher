@@ -10,7 +10,6 @@ Item {
     opacity: 0.0
     z: 1000
 
-    // === Публичный API ===
     property string title: "Установка сборки"
     property string stage: "Подготовка..."
     property string details: ""
@@ -25,14 +24,12 @@ Item {
 
     Behavior on opacity { NumberAnimation { duration: 200 } }
 
-    // Затемнение фона
     Rectangle {
         anchors.fill: parent
         color: Qt.rgba(0, 0, 0, 0.55)
         MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons }
     }
 
-    // Карточка — фиксированный размер, центрирование без scale
     Rectangle {
         id: card
         width: Math.min(560, root.width - 80)
@@ -43,7 +40,7 @@ Item {
         border.color: Qt.rgba(1, 1, 1, 0.08)
         border.width: 1
 
-        // Тень
+
         layer.enabled: true
         layer.effect: MultiEffect {
             shadowEnabled: true
@@ -60,7 +57,6 @@ Item {
             anchors.bottomMargin: 22
             spacing: 0
 
-            // --- Заголовок ---
             Text {
                 text: root.title
                 color: "#FFFFFF"
@@ -72,7 +68,6 @@ Item {
 
             Item { Layout.preferredHeight: 12 }
 
-            // --- Этап ---
             Text {
                 text: root.stage
                 color: Qt.rgba(1, 1, 1, 0.8)
@@ -83,7 +78,6 @@ Item {
 
             Item { Layout.preferredHeight: 6 }
 
-            // --- Детали (резервируем место всегда, чтобы карточка не "прыгала") ---
             Text {
                 text: root.details.length > 0 ? root.details : " "
                 color: Qt.rgba(1, 1, 1, 0.4)
@@ -94,20 +88,17 @@ Item {
 
             Item { Layout.preferredHeight: 18 }
 
-            // --- Прогресс-бар ---
             Item {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 8
                 clip: true
 
-                // Фон
                 Rectangle {
                     anchors.fill: parent
                     radius: 4
                     color: Qt.rgba(1, 1, 1, 0.08)
                 }
 
-                // Детерминированный
                 Rectangle {
                     visible: !root.indeterminate
                     anchors.left: parent.left
@@ -122,7 +113,6 @@ Item {
                     }
                 }
 
-                // Неопределённый — правильная анимация внутри clip
                 Rectangle {
                     visible: root.indeterminate
                     width: parent.width * 0.35
@@ -146,7 +136,6 @@ Item {
 
             Item { Layout.preferredHeight: 10 }
 
-            // --- Процент / статус ---
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
@@ -170,7 +159,6 @@ Item {
 
             Item { Layout.fillHeight: true }
 
-            // --- Кнопка "Отмена" ---
             Button {
                 id: cancelBtn
                 Layout.alignment: Qt.AlignRight
@@ -179,7 +167,7 @@ Item {
                 hoverEnabled: true
                 flat: true
                 padding: 0
-                visible: root.cancellable
+                visible: false
 
                 contentItem: Text {
                     text: "Отмена"

@@ -9,6 +9,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QDirIterator>
 
 class SettingsManager: public QObject {
     Q_OBJECT
@@ -43,6 +44,13 @@ public:
 
     void CreateTemplateFile();
 
+    void ensureLatestJava();
+    QList<QPair<QString, int>> getAllJavaInstallations() const;
+    QString findJavaByMajor(int major) const;
+    static bool isValidJavaExecutable(const QString& path);
+    int getJavaMajorVersion(const QString& path) const;
+    void invalidateJavaCache();
+
     Q_INVOKABLE QString configFilePath() const;
 public slots:
     void load();
@@ -68,6 +76,8 @@ private:
 
     bool m_loading = false;
 
+    mutable QList<QPair<QString, int>> m_javaCache;
+    mutable bool m_javaCacheValid = false;
+
     QString detectJavaPath() const;
-    static bool isValidJavaExecutable(const QString& path);
 };

@@ -11,6 +11,88 @@
 
 namespace fs = std::filesystem;
 
+QList<QPair<QString, int>> SettingsManager::getAllJavaInstallations() const
+{
+    if (m_javaCacheValid) return m_javaCache;
+
+    m_javaCache.clear();
+    auto tryAdd = [&](const QString& path) {
+        if (path.isEmpty()) return;
+        QFileInfo fi(path);
+        if (!fi.exists() || !fi.isFile()) return;
+
+        const QString canonical = fi.canonicalFilePath();
+        for (const auto& c : m_javaCache)
+            if (QFileInfo(c.first).canonicalFilePath() == canonical) return;
+
+        int major = getJavaMajorVersion(path);
+        if (major > 0) m_javaCache << qMakePair(fi.absoluteFilePath(), major);
+    };
+
+    for (const QString& var : {"JAVA_HOME", "JDK_HOME", "JRE_HOME"}) {
+        QString base = qEnvironmentVariable(var.toUtf8().constData());
+        if (!base.isEmpty()) tryAdd(base + "/bin/java.exe");
+    }
+
+    QString fromPath = QStandardPaths::findExecutable("java");
+    if (!fromPath.isEmpty() && !fromPath.contains("javapath", Qt::CaseInsensitive))
+        tryAdd(fromPath);
+
+    QStringList roots = {
+        "C:/Program Files/Java", "C:/Program Files/Eclipse Adoptium",
+        "C:/Program Files/Microsoft", "C:/Program Files/BellSoft",
+        "C:/Program Files/Amazon Corretto", "C:/Program Files/Zulu",
+        "C:/Program Files/Oracle", "C:/Program Files/IBM",
+        "C:/Program Files (x86)/Java", "C:/Program Files (x86)/Eclipse Adoptium"
+    };
+    const QString userProfile = qEnvironmentVariable("USERPROFILE");
+    if (!userProfile.isEmpty())
+        roots << userProfile + "/.jdks" << userProfile + "/scoop/apps";
+    const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
+    if (!localAppData.isEmpty())
+        roots << localAppData + "/Programs/Eclipse Adoptium"
+              << localAppData + "/Programs/Zulu";
+
+    for (const QString& root : roots) {
+        if (!QDir(root).exists()) continue;
+        QDirIterator it(root, {"java.exe"}, QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString path = it.next();
+            const QString rel = QDir(root).relativeFilePath(path);
+            if (rel.count('/') + rel.count('\\') > 5) continue;
+            tryAdd(path);
+        }
+    }
+
+    std::sort(m_javaCache.begin(), m_javaCache.end(),
+              [](const QPair<QString,int>& a, const QPair<QString,int>& b) {
+                  return a.second < b.second;
+              });
+    m_javaCacheValid = true;
+    return m_javaCache;
+}
+
+QString SettingsManager::findJavaByMajor(int requiredMajor) const
+{
+    const auto all = getAllJavaInstallations();
+    if (all.isEmpty()) return "";
+
+    for (const auto& j : all)
+        if (j.second == requiredMajor)
+            return j.first;
+
+    for (const auto& j : all)
+        if (j.second > requiredMajor)
+            return j.first;
+
+    return all.last().first;
+}
+
+void SettingsManager::invalidateJavaCache()
+{
+    m_javaCacheValid = false;
+}
+
 bool SettingsManager::isValidJavaExecutable(const QString& path)
 {
     if (path.isEmpty()) return false;
@@ -27,63 +109,149 @@ bool SettingsManager::isValidJavaExecutable(const QString& path)
 
 QString SettingsManager::detectJavaPath() const
 {
-    const QStringList envVars = {"JAVA_HOME", "JDK_HOME", "JRE_HOME"};
-    for (const QString& var : envVars) {
+    QList<QPair<QString, int>> candidates;
+
+    auto tryAdd = [&](const QString& path) {
+        if (path.isEmpty()) return;
+        QFileInfo fi(path);
+        if (!fi.exists() || !fi.isFile()) return;
+
+        const QString canonical = fi.canonicalFilePath();
+        for (const auto& c : candidates) {
+            if (QFileInfo(c.first).canonicalFilePath() == canonical)
+                return;
+        }
+
+        int major = getJavaMajorVersion(path);
+        if (major > 0)
+            candidates << qMakePair(fi.absoluteFilePath(), major);
+    };
+
+    for (const QString& var : {"JAVA_HOME", "JDK_HOME", "JRE_HOME"}) {
         QString base = qEnvironmentVariable(var.toUtf8().constData());
-        if (base.isEmpty()) continue;
-        QString exe = base + "/bin/java" + ".exe";
-        if (isValidJavaExecutable(exe)) return exe;
+        if (!base.isEmpty())
+            tryAdd(base + "/bin/java.exe");
     }
 
     QString fromPath = QStandardPaths::findExecutable("java");
-    if (!fromPath.isEmpty() && isValidJavaExecutable(fromPath))
-        return fromPath;
+    if (!fromPath.isEmpty() && !fromPath.contains("javapath", Qt::CaseInsensitive))
+        tryAdd(fromPath);
 
-    QStringList searchRoots;
-    searchRoots << "C:/Program Files/Java"
-                << "C:/Program Files/Eclipse Adoptium"
-                << "C:/Program Files/Microsoft"
-                << "C:/Program Files/BellSoft"
-                << "C:/Program Files/Amazon Corretto"
-                << "C:/Program Files/Zulu"
-                << "C:/Program Files/Common Files/Oracle/Java"
-                << "C:/Program Files/Oracle";
+    const QString userProfile = qEnvironmentVariable("USERPROFILE");
+    const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
 
-    QStringList candidates;
+    QStringList searchRoots = {
+        "C:/Program Files/Java",
+        "C:/Program Files/Eclipse Adoptium",
+        "C:/Program Files/Microsoft",
+        "C:/Program Files/BellSoft",
+        "C:/Program Files/Amazon Corretto",
+        "C:/Program Files/Zulu",
+        "C:/Program Files/IBM",
+        "C:/Program Files/Semeru",
+        "C:/Program Files/SapMachine",
+        "C:/Program Files/Liberica",
+        "C:/Program Files/GraalVM",
+        "C:/Program Files/Oracle",
+        "C:/Program Files (x86)/Java",
+        "C:/Program Files (x86)/Eclipse Adoptium",
+        "C:/Program Files (x86)/Zulu"
+    };
+
+    if (!userProfile.isEmpty()) {
+        searchRoots << userProfile + "/.jdks"
+                    << userProfile + "/scoop/apps"
+                    << userProfile + "/.gradle/jdks"
+                    << userProfile + "/.m2/toolchains";
+    }
+    if (!localAppData.isEmpty()) {
+        searchRoots << localAppData + "/Programs/Eclipse Adoptium"
+                    << localAppData + "/Programs/Microsoft"
+                    << localAppData + "/Programs/Zulu";
+    }
+
     for (const QString& root : searchRoots) {
-        QDir r(root);
-        if (!r.exists()) continue;
-        for (const QFileInfo& sub : r.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
-            QString exe = sub.absoluteFilePath() + "/bin/java" + ".exe";
-            candidates << exe;
+        QDir rootDir(root);
+        if (!rootDir.exists()) continue;
+
+        QDirIterator it(root, {"java.exe"}, QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString path = it.next();
+
+            const QString rel = rootDir.relativeFilePath(path);
+            const int depth = rel.count('/') + rel.count('\\');
+            if (depth > 5) continue;
+
+            tryAdd(path);
         }
     }
 
-    struct Cand { QString path; int major; };
-    QList<Cand> valid;
-    for (const QString& c : candidates) {
-        if (!isValidJavaExecutable(c)) continue;
-        QProcess p;
-        p.start(c, {"-version"});
-        p.waitForFinished(2000);
-        QString out = QString::fromLocal8Bit(p.readAllStandardError());
-        QRegularExpression re(R"("(\d+)(?:\.(\d+))?)");
-        auto m = re.match(out);
-        int major = 0;
-        if (m.hasMatch()) {
-            major = m.captured(1).toInt();
-            if (major == 1 && m.captured(2).length() > 0)
-                major = m.captured(2).toInt(); // "1.8" → 8
-        }
-        valid << Cand{c, major};
+    if (candidates.isEmpty()) {
+        newDebug() << "[Java] No Java installations found";
+        return "";
     }
 
-    if (valid.isEmpty()) return "";
+    std::sort(candidates.begin(), candidates.end(),
+              [](const QPair<QString,int>& a, const QPair<QString,int>& b) {
+                  return a.second > b.second;
+              });
 
-    std::sort(valid.begin(), valid.end(), [](const Cand& a, const Cand& b){
-        return a.major > b.major;
-    });
-    return valid.first().path;
+    newDebug() << "[Java] Found" << candidates.size() << "installation(s):";
+    for (const auto& c : candidates)
+        newDebug() << "  Java" << c.second << "→" << c.first;
+
+    return candidates.first().first;
+}
+
+void SettingsManager::ensureLatestJava()
+{
+    newDebug() << "[Java] Scanning for latest Java...";
+
+    const QString latest = detectJavaPath();
+    if (latest.isEmpty()) {
+        newDebug() << "[Java] No Java found, keeping current path:" << m_javaPath;
+        return;
+    }
+
+    const int latestMajor = getJavaMajorVersion(latest);
+    const int currentMajor = getJavaMajorVersion(m_javaPath);
+
+    newDebug() << "[Java] Latest found: Java" << latestMajor << "at" << latest;
+    newDebug() << "[Java] Currently set: Java" << currentMajor
+               << "at" << (m_javaPath.isEmpty() ? "(empty)" : m_javaPath);
+
+    if (latestMajor > currentMajor || currentMajor < 0) {
+        newDebug() << "[Java] Auto-upgrading to Java" << latestMajor;
+        m_javaPath = latest;
+        save();
+        emit javaPathChanged();
+    } else {
+        newDebug() << "[Java] Current Java is already the latest available";
+    }
+}
+
+int SettingsManager::getJavaMajorVersion(const QString& path) const
+{
+    if (path.isEmpty()) return -1;
+    QFileInfo fi(path);
+    if (!fi.exists() || !fi.isFile()) return -1;
+
+    QProcess p;
+    p.start(path, {"-version"});
+    if (!p.waitForFinished(3000)) return -1;
+
+    QString out = QString::fromLocal8Bit(p.readAllStandardError())
+                  + QString::fromLocal8Bit(p.readAllStandardOutput());
+
+    QRegularExpression re(R"(version\s+"?(\d+)(?:\.(\d+))?[\._\s"])",
+                          QRegularExpression::CaseInsensitiveOption);
+    auto m = re.match(out);
+    if (!m.hasMatch()) return -1;
+
+    int major = m.captured(1).toInt();
+    if (major == 1 && !m.captured(2).isEmpty())
+        major = m.captured(2).toInt();
+    return major;
 }
 
 void SettingsManager::CreateTemplateFile(){
@@ -100,6 +268,8 @@ void SettingsManager::CreateTemplateFile(){
     o["gameDir"] = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/modpacks";
     o["jvmArgs"] = "";
     o["maxRam"] = 4096;
+    o["buildsServerUrl"] = "";
+    o["newsServerUrl"] = "";
 
     QFile f(path);
 
@@ -115,6 +285,7 @@ SettingsManager::SettingsManager(QObject *parent)
     :QObject(parent)
 {
     load();
+    ensureLatestJava();
 }
 
 SettingsManager::~SettingsManager(){

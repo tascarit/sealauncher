@@ -1,9 +1,10 @@
-import QtQuick 2.15
-import QtQuick.Window 2.15
+import QtQuick
+import QtQuick.Window
 import QtMultimedia
-import QtQuick.Controls 2.15
+import QtQuick.Controls
 import QtQuick.Effects
 import QtQuick.Layouts
+import Qt5Compat.GraphicalEffects
 
 Item {
     id: root
@@ -50,13 +51,6 @@ Item {
             anchors.leftMargin: 15
             anchors.rightMargin: 0
             spacing: 10
-
-            Image {
-                source: "qrc:/icons/logo.svg"
-                sourceSize.width: 16
-                sourceSize.height: 16
-                Layout.alignment: Qt.AlignVCenter
-            }
 
             Item {
                 Layout.fillWidth: true
@@ -149,23 +143,6 @@ Item {
                 Layout.bottomMargin: 10
             }
 
-            Text {
-                text: "ДОСТУПНЫЕ СБОРКИ"
-                color: Qt.rgba(1, 1, 1, 0.4)
-                font.pixelSize: 11
-                font.bold: true
-                font.letterSpacing: 0.5
-                Layout.fillWidth: true
-            }
-
-            Rectangle {
-                Layout.fillWidth: true
-                height: 1
-                color: Qt.rgba(1, 1, 1, 0.1)
-                Layout.topMargin: 5
-                Layout.bottomMargin: 5
-            }
-
             ScrollView {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -176,6 +153,32 @@ Item {
                     model: buildModel
                     spacing: 8
                     currentIndex: 0
+
+                    section.property: "category"
+                    section.delegate: Rectangle {
+                        width: buildListView.width
+                        height: 34
+                        color: "transparent"
+
+                        ColumnLayout {
+                            anchors.fill: parent
+                            spacing: 5
+
+                            Text {
+                                text: section === "local" ? "ЛОКАЛЬНЫЕ СБОРКИ" : "ДОСТУПНЫЕ СБОРКИ"
+                                color: Qt.rgba(1, 1, 1, 0.4)
+                                font.pixelSize: 11
+                                font.bold: true
+                                font.letterSpacing: 0.5
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                height: 1
+                                color: Qt.rgba(1, 1, 1, 0.1)
+                            }
+                        }
+                    }
 
                     delegate: Button {
                         id: buildButton
@@ -199,7 +202,7 @@ Item {
                             spacing: 12
 
                             Image {
-                                source: model.icon || "qrc:/icons/default_pack.svg"
+                                source: model.icon || "qrc:/resources/wheat.png"
                                 sourceSize.width: 24
                                 sourceSize.height: 24
                                 Layout.alignment: Qt.AlignVCenter
@@ -222,11 +225,13 @@ Item {
                                     Behavior on opacity { NumberAnimation { duration: 120 } }
                                 }
                                 Text {
-                                    text: model.version
+                                    text: model.packVersion ? model.version + "  |  pack " + model.packVersion : model.version
                                     color: buildButton.isSelected ? Qt.rgba(1, 1, 1, 0.6) : Qt.rgba(1, 1, 1, 0.4)
                                     font.pixelSize: 11
                                 }
                             }
+
+                            Item { Layout.fillWidth: true }
                         }
 
                         background: Rectangle {
@@ -257,7 +262,7 @@ Item {
 
                         onClicked: {
                             buildListView.currentIndex = index
-                            minecraftHandler.reCheckBuilds(model.name, model.v, model.loader, model.mcV, model.git, model.parts)
+                            minecraftHandler.reCheckBuilds(model.name, model.v, model.loader, model.mcV, model.git, model.parts, model.packVersion || "0.1")
                         }
 
                     }
@@ -266,8 +271,6 @@ Item {
 
             ListModel {
                 id: buildModel
-                ListElement { name: "Krevetka"; version: "1.21.1 (neoforge 21.1.250)"; icon: "qrc:/resources/wheat.png"; v: "21.1.250"; loader: "neoforge" ; mcV: "1.21.1"; git: "https://github.com/tascarit/KrevetkaPack/releases/latest/download/Krevetka.zip"; parts: 1}
-                ListElement { name: "Test"; version: "1.21.1 (neoforge 21.1.250)"; icon: "qrc:/icons/vanilla.svg"; v: "1.12.2"; loader: "forge"; mcV: "1.12.2" }
             }
 
             Text {
@@ -318,6 +321,33 @@ Item {
                 }
 
                 Button {
+                    id: createBuildButton
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 40
+                    hoverEnabled: true
+                    flat: true
+
+                    contentItem: Text {
+                        text: "+ Создать сборку"
+                        color: "#FFFFFF"
+                        font.pixelSize: 13
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        opacity: createBuildButton.hovered ? 1.0 : 0.7
+                    }
+
+                    background: Rectangle {
+                        radius: 8
+                        color: createBuildButton.down ? Qt.rgba(0.2, 0.5, 1, 0.25)
+                                                      : (createBuildButton.hovered ? Qt.rgba(0.2, 0.5, 1, 0.15) : Qt.rgba(0.2, 0.5, 1, 0.08))
+                        border.color: Qt.rgba(0.4, 0.6, 1, 0.3)
+                        border.width: 1
+                    }
+
+                    onClicked: buildCreatorDialog.open()
+                }
+
+                Button {
                     id: settingsButton
                     Layout.fillWidth: true
                     Layout.preferredHeight: 44
@@ -328,7 +358,7 @@ Item {
                         anchors.centerIn: parent
 
                         Image {
-                            source: "qrc:/icons/gear.png"
+                            source: "qrc:/resources/settings.png"
                             sourceSize.width: 16
                             sourceSize.height: 16
                             opacity: settingsButton.hovered ? 1.0 : 0.7
@@ -369,13 +399,46 @@ Item {
                 Layout.bottomMargin: 5
             }
 
-            Text {
-                text: "v" + settings.version
-                color: Qt.rgba(1, 1, 1, 0.4)
-                font.pixelSize: 11
-                font.bold: true
-                font.letterSpacing: 0.5
+            RowLayout {
                 Layout.fillWidth: true
+                spacing: 8
+
+                Text {
+                    text: "v" + settings.version
+                    color: Qt.rgba(1, 1, 1, 0.4)
+                    font.pixelSize: 11
+                    font.bold: true
+                    font.letterSpacing: 0.5
+                }
+
+                Button {
+                    id: discordButton
+                    Layout.preferredWidth: 32
+                    Layout.preferredHeight: 32
+                    hoverEnabled: true
+                    flat: true
+                    padding: 0
+
+                    contentItem: Image {
+                        source: "qrc:/resources/discord.png"
+                        sourceSize.width: 120
+                        sourceSize.height: 100
+                        anchors.centerIn: parent
+                        opacity: discordButton.hovered ? 1.0 : 0.6
+                        Behavior on opacity { NumberAnimation { duration: 120 } }
+                    }
+
+                    background: Rectangle {
+                        radius: 6
+                        color: discordButton.hovered ? "#5865F2" : Qt.rgba(1, 1, 1, 0.05)
+                        border.color: discordButton.hovered ? "#5865F2" : Qt.rgba(1, 1, 1, 0.1)
+                        border.width: 1
+                        Behavior on color { ColorAnimation { duration: 120 } }
+                        Behavior on border.color { ColorAnimation { duration: 120 } }
+                    }
+
+                    onClicked: Qt.openUrlExternally("https://discord.gg/8jwbtANvsD")
+                }
             }
         }
     }
@@ -395,6 +458,90 @@ Item {
             visible: opacity > 0.0
             Behavior on opacity { NumberAnimation { duration: 250 } }
 
+            component NewsCard : Item {
+                id: card
+                property string titleText: ""
+                property string dateText: ""
+                property string bgImage: ""
+
+                width: parent ? parent.width / 2 - 8 : 200
+                height: 140
+
+                Item {
+                    id: cardContainer
+                    anchors.fill: parent
+                    layer.enabled: true
+                    layer.effect: OpacityMask {
+                        maskSource: Rectangle {
+                            width: cardContainer.width
+                            height: cardContainer.height
+                            radius: 8
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: "#1E1E24"
+                    }
+
+                    Image {
+                        id: cardImg
+                        source: card.bgImage
+                        anchors.fill: parent
+                        fillMode: Image.PreserveAspectCrop
+                        asynchronous: true
+                        visible: card.bgImage !== ""
+                        scale: cardMouse.hovered ? 1.05 : 1.0
+                        Behavior on scale { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                    }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        gradient: Gradient {
+                            GradientStop { position: 0.0; color: Qt.rgba(0, 0, 0, 0.2) }
+                            GradientStop { position: 0.6; color: Qt.rgba(0, 0, 0, 0.6) }
+                            GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.85) }
+                        }
+                    }
+
+                    HoverHandler { id: cardMouse }
+
+                    Rectangle {
+                        id: borderRect
+                        anchors.fill: parent
+                        color: "transparent"
+                        border.color: cardMouse.hovered ? "#FFDE7D" : Qt.rgba(1, 1, 1, 0.05)
+                        border.width: 3
+                        Behavior on border.color { ColorAnimation { duration: 150 } }
+                    }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 4
+
+                        Item { Layout.fillHeight: true }
+
+                        Text {
+                            text: card.dateText
+                            color: Qt.rgba(1, 1, 1, 0.5)
+                            font.pixelSize: 10
+                            font.weight: Font.Medium
+                        }
+                        Text {
+                            text: card.titleText
+                            color: "#FFFFFF"
+                            font.pixelSize: 13
+                            font.bold: true
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                            Layout.bottomMargin: cardMouse.hovered ? 2 : 0
+                            Behavior on Layout.bottomMargin { NumberAnimation { duration: 150 } }
+                        }
+                    }
+                }
+            }
+
             ColumnLayout {
                 id: newsSection
                 anchors.top: parent.top
@@ -412,116 +559,23 @@ Item {
                 }
 
                 GridLayout {
+                    id: newsGrid
+                    columns: 2
                     rowSpacing: 16
                     columnSpacing: 16
-                    columns: 2
-                    Layout.alignment: parent
+                    Layout.fillWidth: true
 
-                    component NewsCard : Rectangle {
-                        id: card
-                        property string titleText: ""
-                        property string dateText: ""
-                        property string bgImage: ""
+                    Repeater {
+                        id: newsRepeater
+                        model: []
 
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 140
-                        radius: 8
-                        color: "#1E1E24"
-                        clip: true
-
-                        HoverHandler { id: cardMouse }
-
-                        MultiEffect {
-                            clip: true
-                            source: cardImg
-                            anchors.fill: parent
-                            maskEnabled: true
-                            maskSource: cardMask
+                        delegate: NewsCard {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 140
+                            titleText: modelData.title || ""
+                            dateText: modelData.date || ""
+                            bgImage: modelData.image || ""
                         }
-
-                        Image {
-                            id: cardImg
-                            source: card.bgImage
-                            anchors.fill: parent
-                            fillMode: Image.PreserveAspectCrop
-                            asynchronous: true
-                            visible: false
-
-                            scale: cardMouse.hovered ? 1.05 : 1.0
-                            Behavior on scale { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
-                        }
-
-                        Item {
-                            clip: true
-                            id: cardMask
-                            anchors.fill: cardImg; layer.enabled: true; visible: false
-                            Rectangle {anchors.fill: parent; radius: parent.parent.radius}
-                        }
-
-                        Rectangle {
-                            id: borderRect
-                            anchors.fill: parent
-                            radius: card.radius
-
-                            color: "transparent"
-                            border.color: cardMouse.hovered ? "#FFDE7D" : Qt.rgba(1, 1, 1, 0.05)
-                            border.width: 2
-
-                            z: 10
-
-                            Behavior on border.color { ColorAnimation { duration: 150 } }
-                        }
-
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: parent.radius
-                            color: "black"
-                            clip: true
-
-                            gradient: Gradient {
-                                GradientStop { position: 0.0; color: Qt.rgba(0, 0, 0, 0.2) }
-                                GradientStop { position: 0.6; color: Qt.rgba(0, 0, 0, 0.6) }
-                                GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.85) }
-                            }
-                        }
-
-                        ColumnLayout {
-                            anchors.fill: parent
-                            anchors.margins: 14
-                            spacing: 4
-
-                            Item { Layout.fillHeight: true }
-
-                            Text {
-                                text: card.dateText
-                                color: Qt.rgba(1, 1, 1, 0.5)
-                                font.pixelSize: 10
-                                font.weight: Font.Medium
-                            }
-                            Text {
-                                text: card.titleText
-                                color: "#FFFFFF"
-                                font.pixelSize: 13
-                                font.bold: true
-                                Layout.fillWidth: true
-                                wrapMode: Text.WordWrap
-
-                                Layout.bottomMargin: cardMouse.hovered ? 2 : 0
-                                Behavior on Layout.bottomMargin { NumberAnimation { duration: 150 } }
-                            }
-                        }
-                    }
-
-                    NewsCard {
-                        titleText: "Сенсация! Владелец сервера Krevetka захлебнулся спермой!!!"
-                        dateText: "22 сентября 2026"
-                        bgImage: "https://avatars.mds.yandex.net/i?id=ef1218e3961c3db0273eef921db68a53_l-5221319-images-thumbs&n=13"
-                    }
-
-                    NewsCard {
-                        titleText: "Где то под мостом умер некий \"toast\" наевшись залетных карасей"
-                        dateText: "21 сентября 2026 г."
-                        bgImage: "https://i.imgflip.com/7w38au.jpg"
                     }
                 }
             }
@@ -539,6 +593,7 @@ Item {
                 }
 
                 Button {
+                    objectName: "playButton"
                     id: playButton
                     anchors.centerIn: parent
                     width: 260
@@ -547,22 +602,24 @@ Item {
                     flat: true
                     padding: 0
 
+                    readonly property string caption: minecraftHandler.installation ? "УСТАНОВКА" : (minecraftHandler.updateAvailable ? "ОБНОВИТЬ"
+                                                : (minecraftHandler.buildExists ? "ИГРАТЬ" : "СКАЧАТЬ"))
+                    readonly property bool isUpdate: minecraftHandler.updateAvailable
+
                     contentItem: Item {
                         anchors.fill: parent
 
                         Text {
-                            text: minecraftHandler.buildExists ? "ИГРАТЬ" : "СКАЧАТЬ"
+                            text: playButton.caption
                             color: playButton.hovered ? "#000000" : "#2e2e2e"
-
                             font.family: minecraftFont.name
                             font.pixelSize: 18
-
                             anchors.centerIn: parent
                             anchors.horizontalCenterOffset: 2
                             anchors.verticalCenterOffset: 2
                         }
                         Text {
-                            text: minecraftHandler.buildExists ? "ИГРАТЬ" : "СКАЧАТЬ"
+                            text: playButton.caption
                             color: "#FFFFFF"
                             font.family: minecraftFont.name
                             font.pixelSize: 18
@@ -574,11 +631,13 @@ Item {
                         id: btnBg
                         radius: 2
 
-                        color: playButton.down
-                            ? "#2E671E"
-                            : (playButton.hovered ? "#479A2F" : "#3C8527")
+                        color: playButton.isUpdate
+                            ? (playButton.down ? "#6B5A17" : (playButton.hovered ? "#9A822F" : "#857027"))
+                            : (playButton.down ? "#2E671E" : (playButton.hovered ? "#479A2F" : "#3C8527"))
 
-                        border.color: playButton.down ? "#1A3D11" : "#55B635"
+                        border.color: playButton.isUpdate
+                            ? (playButton.down ? "#3D3111" : "#B6A035")
+                            : (playButton.down ? "#1A3D11" : "#55B635")
                         border.width: 2
 
                         Rectangle {
@@ -586,7 +645,7 @@ Item {
                             anchors.right: parent.right
                             anchors.bottom: parent.bottom
                             height: 3
-                            color: "#235218"
+                            color: playButton.isUpdate ? "#524518" : "#235218"
                             radius: 1
                         }
 
@@ -594,7 +653,134 @@ Item {
                     }
 
                     onClicked: {
+                        if (!checkSettings()) {
+                            settingsOpen = true
+                            return
+                        }
                         minecraftHandler.mainButtonClick()
+                    }
+                }
+
+                Button {
+                    id: editButton
+                    anchors.right: playButton.left
+                    anchors.rightMargin: 12
+                    anchors.verticalCenter: playButton.verticalCenter
+                    width: 180
+                    height: 48
+                    hoverEnabled: true
+                    flat: true
+                    padding: 0
+                    visible: minecraftHandler.buildExists && buildListView.currentIndex >= 0 && buildModel.get(buildListView.currentIndex).category === "local"
+
+                    contentItem: Item {
+                        anchors.fill: parent
+                        Text {
+                            text: "РЕДАКТИРОВАТЬ"
+                            color: editButton.hovered ? "#000000" : "#2e2e2e"
+                            font.family: minecraftFont.name
+                            font.pixelSize: 15
+                            anchors.centerIn: parent
+                            anchors.horizontalCenterOffset: 2
+                            anchors.verticalCenterOffset: 2
+                        }
+                        Text {
+                            text: "РЕДАКТИРОВАТЬ"
+                            color: "#FFFFFF"
+                            font.family: minecraftFont.name
+                            font.pixelSize: 15
+                            anchors.centerIn: parent
+                        }
+                    }
+
+                    background: Rectangle {
+                        id: editBtnBg
+                        radius: 2
+                        color: editButton.down
+                            ? "#173B6B"
+                            : (editButton.hovered ? "#2A5FA8" : "#1F4A85")
+                        border.color: editButton.down ? "#0F2647" : "#3A7BD5"
+                        border.width: 2
+
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            height: 3
+                            color: "#0F2647"
+                            radius: 1
+                        }
+                        Behavior on color { ColorAnimation { duration: 80 } }
+                    }
+
+                    onClicked: {
+                        var cur = buildModel.get(buildListView.currentIndex)
+                        if (cur && cur.category === "local") {
+                            buildCreatorDialog.loadBuildForEditing(cur.name)
+                            buildCreatorDialog.open()
+                        }
+                    }
+                }
+
+                Button {
+                    id: deleteButton
+                    anchors.left: playButton.right
+                    anchors.leftMargin: 12
+                    anchors.verticalCenter: playButton.verticalCenter
+                    width: 180
+                    height: 48
+                    hoverEnabled: true
+                    flat: true
+                    padding: 0
+                    visible: minecraftHandler.buildExists
+
+                    contentItem: Item {
+                        anchors.fill: parent
+
+                        Text {
+                            text: "УДАЛИТЬ"
+                            color: deleteButton.hovered ? "#000000" : "#2e2e2e"
+                            font.family: minecraftFont.name
+                            font.pixelSize: 15
+                            anchors.centerIn: parent
+                            anchors.horizontalCenterOffset: 2
+                            anchors.verticalCenterOffset: 2
+                        }
+                        Text {
+                            text: "УДАЛИТЬ"
+                            color: "#FFFFFF"
+                            font.family: minecraftFont.name
+                            font.pixelSize: 15
+                            anchors.centerIn: parent
+                        }
+                    }
+
+                    background: Rectangle {
+                        id: delBtnBg
+                        radius: 2
+                        color: deleteButton.down ? "#671E1E" : (deleteButton.hovered ? "#9A3434" : "#852727")
+                        border.color: deleteButton.down ? "#3D1111" : "#B64545"
+                        border.width: 2
+
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            height: 3
+                            color: "#521818"
+                            radius: 1
+                        }
+                        Behavior on color { ColorAnimation { duration: 80 } }
+                    }
+
+                    onClicked: {
+                        var cur = buildModel.get(buildListView.currentIndex)
+                        if (!cur) return
+                        if (cur.category === "local")
+                            localBuildsManager.deleteBuild(cur.name)
+                        else
+                            minecraftHandler.deleteCurrentBuild()
+                        rebuildBuildsModel()
                     }
                 }
             }
@@ -804,6 +990,40 @@ Item {
                         }
                     }
 
+                    Button {
+                        id: openFolderButton
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 40
+                        hoverEnabled: true
+                        flat: true
+
+                        contentItem: RowLayout {
+                            spacing: 10
+                            anchors.centerIn: parent
+                            Image {
+                                source: "qrc:/resources/folder.png"
+                                sourceSize.width: 16
+                                sourceSize.height: 16
+                                opacity: openFolderButton.hovered ? 1.0 : 0.7
+                            }
+                            Text {
+                                text: "Открыть папку лаунчера"
+                                color: "#FFFFFF"
+                                font.pixelSize: 13
+                                opacity: openFolderButton.hovered ? 1.0 : 0.7
+                            }
+                        }
+
+                        background: Rectangle {
+                            radius: 6
+                            color: openFolderButton.down ? Qt.rgba(1, 1, 1, 0.15)
+                                                         : (openFolderButton.hovered ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(1, 1, 1, 0.03))
+                            border.color: Qt.rgba(1, 1, 1, 0.1)
+                        }
+
+                        onClicked: minecraftHandler.openLauncherDir()
+                    }
+
                     Item { Layout.fillHeight: true }
 
                     Button {
@@ -839,12 +1059,34 @@ Item {
 
                         onClicked: {
                             root.settingsOpen = false
-                            console.log("Сохранено ОЗУ:", ramSlider.value, "МБ")
-                            console.log("Аргументы JVM:", jvmArgsInput.text)
+                            minecraftHandler.fetchBuildsList()
+                            minecraftHandler.fetchNews()
                         }
                     }
                 }
             }
+        }
+    }
+
+    Rectangle {
+        id: settingsBanner
+        visible: !settingsOk
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: 34
+        color: "#8a2222"
+        z: 90
+
+        Text {
+            anchors.centerIn: parent
+            color: "#ffffff"
+            text: "Проверьте настройки: " + settingsProblems
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            onClicked: settingsOpen = true
         }
     }
 
@@ -859,6 +1101,88 @@ Item {
         objectName: "errorDialog"
         //onRetried: minecraftHandler.retryLastOperation()
         onClosed: console.log("Ошибка закрыта")
+    }
+
+    BuildCreatorDialog {
+        id: buildCreatorDialog
+    }
+
+    property var serverBuilds: []
+    property bool settingsOk: true
+    property string settingsProblems: ""
+
+    function checkSettings() {
+        var problems = []
+
+        var u = settings.username
+        if (u === undefined || String(u).trim() === "")
+            problems.push("не задан username")
+
+        var gd = settings.gameDir
+        if (gd === undefined || String(gd).trim() === "")
+            problems.push("не задан путь к игре")
+
+        var java = settings.javaPath
+        if (java === undefined || String(java).trim() === "")
+            problems.push("не задан путь к java")
+
+        settingsProblems = problems.join(", ")
+        settingsOk = (problems.length === 0)
+        return settingsOk
+    }
+
+    function rebuildBuildsModel() {
+        var prevName = ""
+        if (buildListView.currentIndex >= 0 && buildListView.currentIndex < buildModel.count) {
+            var cur = buildModel.get(buildListView.currentIndex)
+            if (cur) prevName = cur.name
+        }
+
+        buildModel.clear()
+
+        for (var i = 0; i < serverBuilds.length; i++) {
+            buildModel.append({
+                name: serverBuilds[i].name || "",
+                version: serverBuilds[i].version || "",
+                packVersion: serverBuilds[i].packVersion || "",
+                icon: serverBuilds[i].icon || "",
+                v: serverBuilds[i].v || "",
+                loader: serverBuilds[i].loader || "vanilla",
+                mcV: serverBuilds[i].mcV || "",
+                git: serverBuilds[i].git || "",
+                parts: serverBuilds[i].parts || 1,
+                category: "server"
+            })
+        }
+
+        var local = localBuildsManager.buildsArray()
+        for (var j = 0; j < local.length; j++) {
+            buildModel.append({
+                name: local[j].name,
+                version: local[j].version,
+                packVersion: "0.1",
+                icon: local[j].icon,
+                v: local[j].v,
+                loader: local[j].loader,
+                mcV: local[j].mcV,
+                git: local[j].git,
+                parts: local[j].parts,
+                category: "local"
+            })
+        }
+
+        var idx = 0
+        if (prevName !== "") {
+            for (var k = 0; k < buildModel.count; k++) {
+                if (buildModel.get(k).name === prevName) { idx = k; break }
+            }
+        }
+
+        if (buildModel.count > 0) {
+            buildListView.currentIndex = idx
+            var b = buildModel.get(idx)
+            minecraftHandler.reCheckBuilds(b.name, b.v, b.loader, b.mcV, b.git, b.parts, b.packVersion)
+        }
     }
 
     Connections {
@@ -882,6 +1206,59 @@ Item {
         function onInstallError(title, message, details, canRetry) {
             progressPanel.close()
             errorDialog.show(title, message, details, canRetry)
+        }
+    }
+
+    Connections {
+        target: localBuildsManager
+
+        function onBuildsChanged() {
+            rebuildBuildsModel()
+        }
+
+        function onCreationFinished(name) {
+            progressPanel.close()
+            rebuildBuildsModel()
+        }
+    }
+
+    Connections {
+        target: minecraftHandler
+
+        function onBuildsListReady(builds) {
+            serverBuilds = builds
+            rebuildBuildsModel()
+        }
+
+        function onNewsReady(news) {
+            console.log("QML: onNewsReady called, count:", news.length)
+            let items = []
+            for (let i = 0; i < news.length && i < 8; i++) {
+                items.push({
+                    title: news[i].title || "Без заголовка",
+                    date: news[i].date || "",
+                    image: news[i].image || ""
+                })
+            }
+            console.log("QML: Setting newsRepeater.model to", items.length, "items")
+            newsRepeater.model = items
+        }
+    }
+
+    function selectFirstBuild() {
+        if (buildModel.count === 0) return
+        buildListView.currentIndex = 0
+        var b = buildModel.get(0)
+        minecraftHandler.reCheckBuilds(b.name, b.v, b.loader, b.mcV, b.git, b.parts, b.packVersion)
+    }
+
+    Timer {
+        interval: 400
+        running: true
+        repeat: false
+        onTriggered: {
+            minecraftHandler.fetchBuildsList()
+            minecraftHandler.fetchNews()
         }
     }
 }

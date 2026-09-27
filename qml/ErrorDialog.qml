@@ -10,10 +10,9 @@ Item {
     opacity: 0.0
     z: 600
 
-    // === Публичный API ===
     property string title: "Ошибка"
     property string message: "Что-то пошло не так."
-    property string details: ""                    // разворачиваемая стопка
+    property string details: ""
     property bool detailsExpanded: false
     property bool canRetry: false
 
@@ -33,7 +32,6 @@ Item {
 
     Behavior on opacity { NumberAnimation { duration: 200 } }
 
-    // Затемнение
     Rectangle {
         anchors.fill: parent
         color: Qt.rgba(0, 0, 0, 0.65)
@@ -41,7 +39,6 @@ Item {
         MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons }
     }
 
-    // Карточка
     Rectangle {
         id: card
         anchors.centerIn: parent
@@ -61,7 +58,6 @@ Item {
             anchors.margins: 24
             spacing: 14
 
-            // Заголовок с иконкой
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 12
@@ -99,7 +95,6 @@ Item {
                 color: Qt.rgba(1, 1, 1, 0.08)
             }
 
-            // Сообщение
             Text {
                 text: root.message
                 color: Qt.rgba(1, 1, 1, 0.8)
@@ -108,7 +103,6 @@ Item {
                 wrapMode: Text.WordWrap
             }
 
-            // Кнопка "Подробности"
             Button {
                 id: detailsBtn
                 visible: root.details.length > 0
@@ -139,7 +133,6 @@ Item {
                 onClicked: root.detailsExpanded = !root.detailsExpanded
             }
 
-            // Раскрывающийся блок с деталями
             Rectangle {
                 Layout.fillWidth: true
                 Layout.preferredHeight: root.detailsExpanded
@@ -176,7 +169,6 @@ Item {
                 }
             }
 
-            // Кнопки действий
             RowLayout {
                 Layout.fillWidth: true
                 Layout.topMargin: 4
@@ -184,7 +176,6 @@ Item {
 
                 Item { Layout.fillWidth: true }
 
-                // "Закрыть"
                 Button {
                     id: closeBtn
                     Layout.preferredWidth: 130
@@ -215,7 +206,6 @@ Item {
                     onClicked: { root.hide(); root.closed() }
                 }
 
-                // "Повторить"
                 Button {
                     id: retryBtn
                     visible: root.canRetry
