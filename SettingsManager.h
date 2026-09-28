@@ -71,8 +71,8 @@ private:
     QString m_javaPath;
     QString m_gameDir;
     QString m_jvmArgs;
-    int m_version;
-    int m_maxRam;
+    int m_version = 1;
+    int m_maxRam = 4096;
 
     bool m_loading = false;
 

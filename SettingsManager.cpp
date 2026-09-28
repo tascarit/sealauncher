@@ -109,98 +109,27 @@ bool SettingsManager::isValidJavaExecutable(const QString& path)
 
 QString SettingsManager::detectJavaPath() const
 {
-    QList<QPair<QString, int>> candidates;
-
-    auto tryAdd = [&](const QString& path) {
-        if (path.isEmpty()) return;
-        QFileInfo fi(path);
-        if (!fi.exists() || !fi.isFile()) return;
-
-        const QString canonical = fi.canonicalFilePath();
-        for (const auto& c : candidates) {
-            if (QFileInfo(c.first).canonicalFilePath() == canonical)
-                return;
-        }
-
-        int major = getJavaMajorVersion(path);
-        if (major > 0)
-            candidates << qMakePair(fi.absoluteFilePath(), major);
-    };
-
-    for (const QString& var : {"JAVA_HOME", "JDK_HOME", "JRE_HOME"}) {
-        QString base = qEnvironmentVariable(var.toUtf8().constData());
-        if (!base.isEmpty())
-            tryAdd(base + "/bin/java.exe");
-    }
-
-    QString fromPath = QStandardPaths::findExecutable("java");
-    if (!fromPath.isEmpty() && !fromPath.contains("javapath", Qt::CaseInsensitive))
-        tryAdd(fromPath);
-
-    const QString userProfile = qEnvironmentVariable("USERPROFILE");
-    const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
-
-    QStringList searchRoots = {
-        "C:/Program Files/Java",
-        "C:/Program Files/Eclipse Adoptium",
-        "C:/Program Files/Microsoft",
-        "C:/Program Files/BellSoft",
-        "C:/Program Files/Amazon Corretto",
-        "C:/Program Files/Zulu",
-        "C:/Program Files/IBM",
-        "C:/Program Files/Semeru",
-        "C:/Program Files/SapMachine",
-        "C:/Program Files/Liberica",
-        "C:/Program Files/GraalVM",
-        "C:/Program Files/Oracle",
-        "C:/Program Files (x86)/Java",
-        "C:/Program Files (x86)/Eclipse Adoptium",
-        "C:/Program Files (x86)/Zulu"
-    };
-
-    if (!userProfile.isEmpty()) {
-        searchRoots << userProfile + "/.jdks"
-                    << userProfile + "/scoop/apps"
-                    << userProfile + "/.gradle/jdks"
-                    << userProfile + "/.m2/toolchains";
-    }
-    if (!localAppData.isEmpty()) {
-        searchRoots << localAppData + "/Programs/Eclipse Adoptium"
-                    << localAppData + "/Programs/Microsoft"
-                    << localAppData + "/Programs/Zulu";
-    }
-
-    for (const QString& root : searchRoots) {
-        QDir rootDir(root);
-        if (!rootDir.exists()) continue;
-
-        QDirIterator it(root, {"java.exe"}, QDir::Files, QDirIterator::Subdirectories);
-        while (it.hasNext()) {
-            const QString path = it.next();
-
-            const QString rel = rootDir.relativeFilePath(path);
-            const int depth = rel.count('/') + rel.count('\\');
-            if (depth > 5) continue;
-
-            tryAdd(path);
-        }
-    }
-
-    if (candidates.isEmpty()) {
+    // Раньше здесь был полный дубль сканирования из getAllJavaInstallations()
+    // (те же самые директории, то же самое синхронное "java -version" на
+    // каждый найденный java.exe), но БЕЗ кэша. Из-за этого при старте
+    // приложения полное рекурсивное сканирование диска с блокирующим
+    // запуском процессов выполнялось дважды подряд (load() -> getPaths(),
+    // затем ensureLatestJava()), заметно замедляя запуск. Теперь переиспользуем
+    // getAllJavaInstallations() — она кэширует результат (m_javaCacheValid),
+    // так что повторный вызов почти бесплатен.
+    const auto all = getAllJavaInstallations();
+    if (all.isEmpty()) {
         newDebug() << "[Java] No Java installations found";
         return "";
     }
 
-    std::sort(candidates.begin(), candidates.end(),
-              [](const QPair<QString,int>& a, const QPair<QString,int>& b) {
-                  return a.second > b.second;
-              });
-
-    newDebug() << "[Java] Found" << candidates.size() << "installation(s):";
-    for (const auto& c : candidates)
+    // getAllJavaInstallations() сортирует по возрастанию major-версии,
+    // поэтому последний элемент — самая новая найденная Java.
+    newDebug() << "[Java] Found" << all.size() << "installation(s):";
+    for (const auto& c : all)
         newDebug() << "  Java" << c.second << "→" << c.first;
 
-    return candidates.first().first;
+    return all.last().first;
 }
 
 void SettingsManager::ensureLatestJava()
@@ -329,7 +258,7 @@ void SettingsManager::load(){
     m_gameDir  = o.value("gameDir").toString(m_gameDir);
     m_jvmArgs  = o.value("jvmArgs").toString(m_jvmArgs);
     m_version = o.value("version").toInt(m_version);
-    m_maxRam = o.value("maxRam").toInt(m_version);
+    m_maxRam = o.value("maxRam").toInt(m_maxRam);
 
     if (m_ramMb < 2048) m_ramMb = 2048;
 

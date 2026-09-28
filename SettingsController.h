@@ -109,12 +109,19 @@ public:
     void registerViewConnections(QQuickView* view){
 
 
-        QQuickItem* m_backgroundVideo = view->rootObject()->findChild<QQuickItem*>("background");
+        QQuickItem* backgroundVideo = view->rootObject()->findChild<QQuickItem*>("background");
 
-        QObject::connect(view, &QWindow::visibilityChanged, [&](QWindow::Visibility v){
+        // ВАЖНО: захват по значению ([&] здесь был багом). view->visibilityChanged
+        // срабатывает асинхронно, в любой момент после того, как этот метод
+        // уже вернул управление и его стек-фрейм разрушен. Захват по ссылке
+        // ([&]) означал, что и view, и backgroundVideo (локальные переменные
+        // этого метода) становились dangling-ссылками сразу после выхода из
+        // функции, а при первом же сворачивании/разворачивании окна — UB/краш.
+        QObject::connect(view, &QWindow::visibilityChanged, view, [backgroundVideo](QWindow::Visibility v){
+            if (!backgroundVideo) return;
             const bool run = (v == QWindow::Windowed || v == QWindow::Maximized ||
                               v == QWindow::FullScreen);
-            QMetaObject::invokeMethod(m_backgroundVideo, run ? "play" : "stop",
+            QMetaObject::invokeMethod(backgroundVideo, run ? "play" : "stop",
                                       Qt::QueuedConnection);
         });
     }

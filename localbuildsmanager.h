@@ -60,7 +60,6 @@ private:
     void save();
     QString configPath() const;
     Entry findEntry(const QString& name) const;
-    void startModDownloadQueue(const QString& name);
     QString readMetaPackVersion(const QString& gamePath) const;
 
     SettingsManager* m_sm = nullptr;

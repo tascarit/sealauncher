@@ -14,6 +14,7 @@
 class NewDebug {
 private:
     QString buffer;
+    static void writeLine(const QString& line);
 
 public:
     NewDebug() {
@@ -21,26 +22,13 @@ public:
     }
 
     ~NewDebug() {
-        const QString path = configPath();
-        const QString dir = QFileInfo(path).absolutePath();
-
-        QDir().mkpath(dir);
-        QFile f(path);
-
-        if (!f.open(QIODeviceBase::Append | QIODeviceBase::Text)){
-            qDebug() << "ERROR: Failed to open log file";
-        } else {
-            QTextStream out(&f);
-            out << buffer << "\n";
-        }
-        f.close();
-
+        writeLine(buffer);
         qDebug().noquote() << buffer;
     }
 
-    QString configPath();
-    std::string getCurrentTime();
-    std::string getHour();
+    static QString configPath();
+    static std::string getCurrentTime();
+    static std::string getHour();
 
     template <typename T>
     NewDebug& operator<<(const T& value) {

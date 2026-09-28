@@ -49,7 +49,7 @@ static QString jsonValueToString(const QJsonValue& value, int indent)
     }
 }
 
-void printJsonObject(const QJsonObject& obj, const QString& title = QString())
+inline void printJsonObject(const QJsonObject& obj, const QString& title = QString())
 {
     if (!title.isEmpty())
         qDebug().noquote() << "=== " << title << " ===";

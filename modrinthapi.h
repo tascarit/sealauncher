@@ -20,9 +20,9 @@ public:
     Q_INVOKABLE void getProjectVersions(const QString& projectId, const QString& gameVersion = QString(), const QString& loader = QString());
     Q_INVOKABLE void downloadFile(const QString& url, const QString& savePath);
 
-    void requestProject(const QString& projectId, std::function<void(const QJsonObject&)> cb);
-    void requestVersions(const QString& projectId, const QString& gameVersion, const QString& loader, std::function<void(const QJsonArray&)> cb);
-    void requestVersion(const QString& versionId, std::function<void(const QJsonObject&)> cb);
+    void requestProject(const QString& projectId, std::function<void(const QJsonObject&)> cb, QObject* context = nullptr);
+    void requestVersions(const QString& projectId, const QString& gameVersion, const QString& loader, std::function<void(const QJsonArray&)> cb, QObject* context = nullptr);
+    void requestVersion(const QString& versionId, std::function<void(const QJsonObject&)> cb, QObject* context = nullptr);
 
     static QString getApiBaseUrl() { return QStringLiteral("https://api.modrinth.com/v2"); }
 
@@ -37,7 +37,7 @@ private:
     QNetworkAccessManager* m_manager;
 
     QNetworkRequest createRequest(const QString& endpoint);
-    void handleResponse(QNetworkReply* reply, std::function<void(const QJsonDocument&)> callback);
+    void handleResponse(QNetworkReply* reply, QObject* context, std::function<void(const QJsonDocument&)> callback);
 };
 
 #endif

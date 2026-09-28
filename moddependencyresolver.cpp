@@ -70,7 +70,8 @@ void ModDependencyResolver::resolveProject(const QString& projectId,
 
             m_pending--;
             finishIfDone();
-        }
+        },
+        this // context: авто-отключение колбэка, если резолвер уже удалён
         );
 }
 
@@ -83,7 +84,7 @@ void ModDependencyResolver::resolveVersion(const QString& versionId, bool userSe
         if (!version.isEmpty()) addVersion(version, userSelected);
         m_pending--;
         finishIfDone();
-    });
+    }, this); // context: авто-отключение колбэка, если резолвер уже удалён
 }
 
 void ModDependencyResolver::finishIfDone()

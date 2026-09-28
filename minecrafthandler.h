@@ -97,11 +97,11 @@ signals:
     void installationChanged();
 
     void downloadProgress(qint64, qint64);
-    void downloadFinished();
+    void downloadFinished(const QString& path);
     void finished();
 
     void installFinished();
-    void downloadFailed(const QString& reason);
+    void downloadFailed(const QString& path, const QString& reason);
 
     void buildsListReady(const QJsonArray& builds);
     void newsReady(const QJsonArray& news);

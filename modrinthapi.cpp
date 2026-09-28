@@ -17,9 +17,14 @@ QNetworkRequest ModrinthApi::createRequest(const QString& endpoint)
     return request;
 }
 
-void ModrinthApi::handleResponse(QNetworkReply* reply, std::function<void(const QJsonDocument&)> callback)
+void ModrinthApi::handleResponse(QNetworkReply* reply, QObject* context, std::function<void(const QJsonDocument&)> callback)
 {
-    connect(reply, &QNetworkReply::finished, this, [this, reply, callback]() {
+    QObject* ctx = context ? context : this;
+    // Подключаем с контекстом вызывающей стороны (ctx), а не с ModrinthApi
+    // (this) — если ctx будет уничтожен раньше, чем reply завершится,
+    // Qt сам отсоединит этот коннекшн и callback не будет вызван на
+    // уже освобождённой памяти.
+    connect(reply, &QNetworkReply::finished, ctx, [this, reply, callback]() {
         if (reply->error() != QNetworkReply::NoError) {
             emit error(reply->errorString());
             reply->deleteLater();
@@ -41,22 +46,24 @@ void ModrinthApi::searchMods(const QString& query,
     params.addQueryItem("limit", "50");
     params.addQueryItem("index", "relevance");
 
-    QStringList facets;
+    // QJsonArray/QJsonDocument сами экранируют спецсимволы — безопаснее,
+    // чем ручная подстановка строк в "[\"...\"]".
+    QJsonArray facets;
 
     if (!gameVersion.isEmpty())
-        facets << QString("[\"versions:%1\"]").arg(gameVersion);
+        facets.append(QJsonArray{"versions:" + gameVersion});
 
     if (!loader.isEmpty())
-        facets << QString("[\"categories:%1\"]").arg(loader);
+        facets.append(QJsonArray{"categories:" + loader});
 
-    facets << "[\"project_type:mod\"]";
+    facets.append(QJsonArray{"project_type:mod"});
 
-    params.addQueryItem("facets", "[" + facets.join(",") + "]");
+    params.addQueryItem("facets", QString::fromUtf8(QJsonDocument(facets).toJson(QJsonDocument::Compact)));
 
     QNetworkReply* reply =
         m_manager->get(createRequest("/search?" + params.toString()));
 
-    handleResponse(reply, [this](const QJsonDocument& doc) {
+    handleResponse(reply, this, [this](const QJsonDocument& doc) {
         emit searchCompleted(doc.object()["hits"].toArray());
     });
 }
@@ -68,27 +75,32 @@ void ModrinthApi::getProjectVersions(const QString& projectId, const QString& ga
     });
 }
 
-void ModrinthApi::requestProject(const QString& projectId, std::function<void(const QJsonObject&)> cb)
+void ModrinthApi::requestProject(const QString& projectId, std::function<void(const QJsonObject&)> cb, QObject* context)
 {
     QNetworkReply* reply = m_manager->get(createRequest("/project/" + projectId));
-    handleResponse(reply, [cb](const QJsonDocument& doc) { cb(doc.object()); });
+    handleResponse(reply, context, [cb](const QJsonDocument& doc) { cb(doc.object()); });
 }
 
-void ModrinthApi::requestVersions(const QString& projectId, const QString& gameVersion, const QString& loader, std::function<void(const QJsonArray&)> cb)
+void ModrinthApi::requestVersions(const QString& projectId, const QString& gameVersion, const QString& loader, std::function<void(const QJsonArray&)> cb, QObject* context)
 {
     QUrlQuery params;
-    if (!gameVersion.isEmpty()) params.addQueryItem("game_versions", QString("[\"%1\"]").arg(gameVersion));
-    if (!loader.isEmpty()) params.addQueryItem("loaders", QString("[\"%1\"]").arg(loader));
+    // Собираем JSON-массивы через QJsonDocument вместо ручной подстановки
+    // строк в "[\"%1\"]" — так gameVersion/loader безопасно экранируются
+    // (не сломают запрос, если вдруг содержат кавычки или спецсимволы).
+    if (!gameVersion.isEmpty())
+        params.addQueryItem("game_versions", QString::fromUtf8(QJsonDocument(QJsonArray{gameVersion}).toJson(QJsonDocument::Compact)));
+    if (!loader.isEmpty())
+        params.addQueryItem("loaders", QString::fromUtf8(QJsonDocument(QJsonArray{loader}).toJson(QJsonDocument::Compact)));
     QString endpoint = "/project/" + projectId + "/version";
     if (!params.isEmpty()) endpoint += "?" + params.toString();
     QNetworkReply* reply = m_manager->get(createRequest(endpoint));
-    handleResponse(reply, [cb](const QJsonDocument& doc) { cb(doc.array()); });
+    handleResponse(reply, context, [cb](const QJsonDocument& doc) { cb(doc.array()); });
 }
 
-void ModrinthApi::requestVersion(const QString& versionId, std::function<void(const QJsonObject&)> cb)
+void ModrinthApi::requestVersion(const QString& versionId, std::function<void(const QJsonObject&)> cb, QObject* context)
 {
     QNetworkReply* reply = m_manager->get(createRequest("/version/" + versionId));
-    handleResponse(reply, [cb](const QJsonDocument& doc) { cb(doc.object()); });
+    handleResponse(reply, context, [cb](const QJsonDocument& doc) { cb(doc.object()); });
 }
 
 void ModrinthApi::downloadFile(const QString& url, const QString& savePath)

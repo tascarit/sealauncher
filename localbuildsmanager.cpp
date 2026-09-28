@@ -534,6 +534,18 @@ void LocalBuildsManager::editBuild(
     save();
     emit buildsChanged();
 
+    // Раньше при простом переименовании (coreChanged == false и
+    // modsChanged == false, изменилось только имя) код всё равно проваливался
+    // в резолвер зависимостей и заново дёргал Modrinth API по каждому моду —
+    // лишние сетевые запросы и задержка без единой причины. Файлы модов при
+    // этом всё равно не перекачивались бы (downloadNextMod проверяет
+    // существование+размер), но сама сверка версий по сети выполнялась зря.
+    if (!coreChanged && !modsChanged) {
+        m_currentBuild.clear();
+        emit creationFinished(cleanNew);
+        return;
+    }
+
     m_currentBuild = cleanNew;
     m_queue.clear();
     m_queueIndex = 0;

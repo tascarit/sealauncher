@@ -382,7 +382,7 @@ QString MinecraftHandler::downloadNeoforge(const QString& version)
         }
         newDebug() << "[NeoForge] Downloaded OK:" << path;
         emit q->installProgress(QStringLiteral("Установщик загружен"), QStringLiteral("Запуск установки..."), 1.0);
-        emit downloadFinished();
+        emit downloadFinished(path);
         reply->deleteLater();
         installNeoforge(path);
     });
@@ -1199,22 +1199,23 @@ void MinecraftHandler::downloadFileParallel(const QString& url, const QString& s
 
         if (probeErr != QNetworkReply::NoError) {
             emit q->installError("Ошибка", "Не удалось получить файл: " + probeErrStr, url, false);
-            mgr->deleteLater(); emit downloadFinished(); return;
+            mgr->deleteLater(); emit downloadFailed(savePath, probeErrStr); return;
         }
         if (rangeHeader.isEmpty()) { newDebug() << "[DL] No Range support, single-stream"; downloadSingleStream(url, savePath, mgr); return; }
 
         int slashPos = rangeHeader.indexOf('/');
-        if (slashPos < 0) { emit q->installError("Ошибка", "Некорректный Content-Range", url, false); mgr->deleteLater(); emit downloadFinished(); return; }
+        if (slashPos < 0) { emit q->installError("Ошибка", "Некорректный Content-Range", url, false); mgr->deleteLater(); emit downloadFailed(savePath, "bad Content-Range"); return; }
 
         qint64 fileSize = rangeHeader.mid(slashPos + 1).toLongLong();
-        if (fileSize <= 0) { emit q->installError("Ошибка", "Размер файла 0", url, false); mgr->deleteLater(); emit downloadFinished(); return; }
+        if (fileSize <= 0) { emit q->installError("Ошибка", "Размер файла 0", url, false); mgr->deleteLater(); emit downloadFailed(savePath, "zero file size"); return; }
 
         newDebug() << "[DL] size:" << fileSize;
 
         QFile file(savePath);
         if (!file.open(QIODevice::ReadWrite)) {
-            emit q->installError("Ошибка", "Не удалось создать файл: " + savePath + " (" + file.errorString() + ")", savePath, false);
-            mgr->deleteLater(); emit downloadFinished(); return;
+            const QString errStr = file.errorString();
+            emit q->installError("Ошибка", "Не удалось создать файл: " + savePath + " (" + errStr + ")", savePath, false);
+            mgr->deleteLater(); emit downloadFailed(savePath, errStr); return;
         }
         file.resize(fileSize);
         file.close();
@@ -1252,12 +1253,22 @@ void MinecraftHandler::downloadSingleStream(const QString& url, const QString& s
                                     double(recv) / double(total));
     });
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply, file, mgr]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, file, mgr, savePath]() {
         const int err = reply->error();
         const QString errStr = reply->errorString();
+        const qint64 written = file->size();
         file->close(); file->deleteLater(); reply->deleteLater(); mgr->deleteLater();
-        if (err != QNetworkReply::NoError) emit q->installError("Ошибка загрузки", errStr, "", true);
-        emit downloadFinished();
+        if (err != QNetworkReply::NoError) {
+            emit q->installError("Ошибка загрузки", errStr, "", true);
+            emit downloadFailed(savePath, errStr);
+            return;
+        }
+        if (written <= 0) {
+            emit q->installError("Ошибка загрузки", "Скачано 0 байт", savePath, true);
+            emit downloadFailed(savePath, "empty file");
+            return;
+        }
+        emit downloadFinished(savePath);
     });
 }
 
@@ -1268,7 +1279,7 @@ void MinecraftHandler::downloadChunks(QNetworkAccessManager* mgr, const QString&
         newDebug() << "[DL] Cannot open:" << savePath << file->errorString();
         delete file; mgr->deleteLater();
         emit q->installError("Ошибка", "Не удалось открыть файл: " + savePath, savePath, true);
-        emit downloadFailed("cannot open file");
+        emit downloadFailed(savePath, "cannot open file");
         return;
     }
 
@@ -1397,9 +1408,9 @@ void MinecraftHandler::downloadChunks(QNetworkAccessManager* mgr, const QString&
                         if (!okFinal) {
                             emit q->installError("Ошибка загрузки",
                                                  QString("Не удалось скачать %1 чанков").arg(failCount), savePath, true);
-                            emit downloadFailed(QString("failed %1").arg(failCount));
+                            emit downloadFailed(savePath, QString("failed %1 chunks").arg(failCount));
                         } else {
-                            emit downloadFinished();
+                            emit downloadFinished(savePath);
                         }
                     }, Qt::QueuedConnection);
                     return;
@@ -1425,11 +1436,15 @@ bool MinecraftHandler::mergeFiles(const QStringList& parts, const QString& outpu
         const qint64 bufSize = 4 * 1024 * 1024;
         while (!in.atEnd()) {
             QByteArray buf = in.read(bufSize);
-            out.write(buf);
+            if (out.write(buf) != buf.size()) {
+                newDebug() << "[Merge] Write failed (disk full?):" << outputPath << out.errorString();
+                in.close(); out.close();
+                return false;
+            }
             copied += buf.size();
             emit q->installProgress("Склейка частей",
                                     QString("%1: %2 / %3 МБ").arg(QFileInfo(part).fileName()).arg(copied / 1048576.0, 0, 'f', 1).arg(totalSize / 1048576.0, 0, 'f', 1),
-                                    double(copied) / double(totalSize));
+                                    totalSize > 0 ? double(copied) / double(totalSize) : 1.0);
         }
         in.close();
     }
@@ -1652,19 +1667,32 @@ void MinecraftHandler::installModpack(const QString& baseUrl, const QString& gam
         int i = state->index++;
         newDebug() << "[Modpack] Downloading part" << (i + 1) << "of" << partUrls.size();
 
+        const QString expectedPath = partPaths[i];
+
         QMetaObject::Connection* okConn = new QMetaObject::Connection();
         QMetaObject::Connection* failConn = new QMetaObject::Connection();
 
-        *okConn = connect(this, &MinecraftHandler::downloadFinished, this, [this, downloadNext, okConn, failConn]() {
+        // Сверяем путь: downloadFinished/downloadFailed — общие сигналы класса,
+        // их может эмитить не связанная с этой сборкой операция (например,
+        // параллельная загрузка установщика лоадера). Реагируем только на
+        // событие именно этой части архива.
+        *okConn = connect(this, &MinecraftHandler::downloadFinished, this,
+                           [this, downloadNext, okConn, failConn, expectedPath](const QString& path) {
+            if (QDir::cleanPath(path) != QDir::cleanPath(expectedPath))
+                return;
             disconnect(*okConn); disconnect(*failConn);
             delete okConn; delete failConn;
             QMetaObject::invokeMethod(this, [downloadNext]() { (*downloadNext)(); }, Qt::QueuedConnection);
         });
-        *failConn = connect(this, &MinecraftHandler::downloadFailed, this, [state, okConn, failConn](const QString&) {
+        *failConn = connect(this, &MinecraftHandler::downloadFailed, this,
+                             [this, state, okConn, failConn, expectedPath](const QString& path, const QString& reason) {
+            if (QDir::cleanPath(path) != QDir::cleanPath(expectedPath))
+                return;
             disconnect(*okConn); disconnect(*failConn);
             delete okConn; delete failConn;
             state->aborted = true;
-            newDebug() << "[Modpack] aborted on part" << state->index;
+            newDebug() << "[Modpack] aborted on part" << state->index << "reason:" << reason;
+            emit q->installError("Ошибка", "Не удалось скачать часть архива", expectedPath, true);
         });
 
         emit q->installProgress("Загрузка сборки", QString("Часть %1 из %2").arg(i + 1).arg(partUrls.size()), 0.0);
@@ -1682,11 +1710,14 @@ void MinecraftHandler::onAllPartsDownloaded(const QStringList& partPaths, const 
         newDebug() << "[Modpack] part:" << p << "exists:" << fi.exists() << "size:" << fi.size();
     }
 
-    // тут баг с распаковкой был, extractZip возвращает false даже если все успешно
-
     auto doExtract = [=, this]() {
         emit q->installProgress("Распаковка сборки", "Подготовка...", 0.0);
-        extractZip(finalZip, gamePath);
+
+        const bool extracted = extractZip(finalZip, gamePath);
+        if (!extracted) {
+            newDebug() << "[Modpack] extractZip FAILED for" << finalZip << "- keeping files for inspection";
+        }
+
         QFile::remove(finalZip);
         for (const QString& p : partPaths) QFile::remove(p);
         setBuildExists(true);
