@@ -262,6 +262,9 @@ void MinecraftHandler::mainButtonClick(){
         else if (m_buildLoader == "fabric") installFabric(m_mcVersion, m_buildVersion);
         else if (m_buildLoader == "forge") installForge(m_mcVersion, m_buildVersion);
 
+        if (m_updateAvailable)
+            m_updateAvailable = false;
+
         emit buildsChanged();
     } else {
         QStringList command = parseVersionJson(gamePath);
