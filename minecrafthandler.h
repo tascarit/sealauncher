@@ -105,6 +105,7 @@ signals:
 
     void buildsListReady(const QJsonArray& builds);
     void newsReady(const QJsonArray& news);
+    void buildsChanged();
     void minecraftStarted();
     void minecraftStopped();
 private:

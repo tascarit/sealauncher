@@ -1230,6 +1230,10 @@ Item {
             rebuildBuildsModel()
         }
 
+        function onBuildsChanged(){
+            rebuildBuildsModel()
+        }
+
         function onNewsReady(news) {
             console.log("QML: onNewsReady called, count:", news.length)
             let items = []

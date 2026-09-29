@@ -261,6 +261,8 @@ void MinecraftHandler::mainButtonClick(){
         else if (m_buildLoader == "vanilla") installVanilla(m_mcVersion);
         else if (m_buildLoader == "fabric") installFabric(m_mcVersion, m_buildVersion);
         else if (m_buildLoader == "forge") installForge(m_mcVersion, m_buildVersion);
+
+        emit buildsChanged();
     } else {
         QStringList command = parseVersionJson(gamePath);
         ensureNarratorDisabled(gamePath);
