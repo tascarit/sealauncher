@@ -244,7 +244,6 @@ void MinecraftHandler::mainButtonClick(){
     if (needInstall){
         newDebug() << "DEBUG: Downloading version for " << m_buildVersion;
         connect(this, &MinecraftHandler::finished, this, [this, gamePath](){
-            ensureNarratorDisabled(gamePath);
             writeBuildMeta(gamePath);
             sc->closeProgressPanel(view);
         }, Qt::SingleShotConnection);
@@ -268,7 +267,6 @@ void MinecraftHandler::mainButtonClick(){
         emit buildsChanged();
     } else {
         QStringList command = parseVersionJson(gamePath);
-        ensureNarratorDisabled(gamePath);
         newDebug() << "DEBUG: Starting minecraft on " << m_buildLoader << " " << m_buildVersion;
         launchMinecraft(command, gamePath);
     }
@@ -301,7 +299,6 @@ void MinecraftHandler::installLocalBuild(const QString& buildName, const QString
     QDir().mkpath(gamePath);
 
     connect(this, &MinecraftHandler::finished, this, [this, gamePath](){
-        ensureNarratorDisabled(gamePath);
         writeBuildMeta(gamePath);
         sc->closeProgressPanel(view);
     }, Qt::SingleShotConnection);
@@ -1141,46 +1138,6 @@ void MinecraftHandler::fetchNews()
         emit newsReady(limited);
     } else {
         emit newsReady(arr);
-    }
-}
-
-void MinecraftHandler::ensureNarratorDisabled(const QString& gamePath)
-{
-    QString optionsPath = gamePath + "/options.txt";
-    QFile file(optionsPath);
-
-    QString content;
-    if (file.exists()) {
-        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            newDebug() << "[Options] Cannot read options.txt";
-            return;
-        }
-        content = file.readAll();
-        file.close();
-    }
-
-    bool needWrite = false;
-    if (!content.contains("narrator:")) {
-        content += "narrator:0\n";
-        needWrite = true;
-    }
-    if (!content.contains("tutorialStep:")) {
-        content += "tutorialStep:none\n";
-        needWrite = true;
-    }
-    if (!content.contains("skipMultiplayerWarning:")) {
-        content += "skipMultiplayerWarning:true\n";
-        needWrite = true;
-    }
-
-    if (needWrite) {
-        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
-            file.write(content.toUtf8());
-            file.close();
-            newDebug() << "[Options] Created/updated options.txt";
-        } else {
-            newDebug() << "[Options] Cannot write options.txt:" << file.errorString();
-        }
     }
 }
 
