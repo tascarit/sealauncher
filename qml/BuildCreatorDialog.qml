@@ -15,8 +15,21 @@ Dialog {
     property bool mcLoading: false
     property string editingBuildName: ""
     property string editingTargetVersion: ""
+    property bool keepForm: false
+
+    function openNew() {
+        if (!(dialog.keepForm && dialog.editingBuildName === "")) {
+            dialog.editingBuildName = ""
+            dialog.editingTargetVersion = ""
+            createBtnText.text = "СОЗДАТЬ СБОРКУ"
+            resetForm()
+        }
+        dialog.keepForm = false
+        dialog.open()
+    }
 
     function loadBuildForEditing(name) {
+        dialog.keepForm = false
         dialog.editingBuildName = name
 
         var localBuilds = localBuildsManager.buildsArray()
@@ -70,6 +83,7 @@ Dialog {
     }
 
     onClosed: {
+        if (dialog.keepForm) return
         dialog.editingBuildName = ""
         dialog.editingTargetVersion = ""
         createBtnText.text = "СОЗДАТЬ СБОРКУ"
@@ -638,17 +652,14 @@ Dialog {
     }
 
     Connections {
-        target: qmlHandler
-
-        function onInstallProgress(stage, details, progress) {
-            if (dialog.visible)
-                dialog.close()
-        }
-    }
-
-    Connections {
         target: modrinthApi
+
+        function onSearchFailed(message) {
+            statusText.text = "Не удалось выполнить поиск модов — проверьте подключение к интернету"
+        }
+
         function onSearchCompleted(projects) {
+            if (statusText.text.indexOf("Не удалось выполнить поиск") === 0) statusText.text = ""
             searchModel.clear()
             var list = projects !== undefined ? projects : []
             for (var i = 0; i < list.length; i++) {
@@ -696,18 +707,24 @@ Dialog {
                 loaderVersionCombo.currentValue = versions[0]
         }
 
-        function onBuildsChanged() {
-           rebuildBuildsModel()
+        function onCreationProgress(stage, details, progress) {
+            if (dialog.visible) {
+                dialog.keepForm = true
+                dialog.close()
+            }
         }
 
         function onCreationFinished(name) {
-           dialog.resetForm()
-           dialog.close()
-           rebuildBuildsModel()
+            dialog.keepForm = false
+            dialog.editingBuildName = ""
+            dialog.editingTargetVersion = ""
+            createBtnText.text = "СОЗДАТЬ СБОРКУ"
+            dialog.resetForm()
+            if (dialog.visible) dialog.close()
         }
 
         function onCreationError(message) {
-           statusText.text = "Ошибка: " + message
+            statusText.text = "Ошибка: " + message
         }
     }
 }

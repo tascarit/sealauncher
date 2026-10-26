@@ -5,17 +5,26 @@ ModDependencyResolver::ModDependencyResolver(ModrinthApi* api, QObject* parent)
 {
 }
 
+QString ModDependencyResolver::displayName(const QString& projectId) const
+{
+    const QString n = m_names.value(projectId);
+    return n.isEmpty() ? projectId : n;
+}
+
 void ModDependencyResolver::resolve(const QStringList& projectIds, const QString& gameVersion, const QString& loader)
 {
     m_visitedProjects.clear();
+    m_requestedVersions.clear();
     m_visitedVersions.clear();
+    m_taskProjects.clear();
     m_tasks.clear();
     m_pending = 0;
+    m_finished = false;
     m_gameVersion = gameVersion;
     m_loader = loader;
-    m_hasError = false;
 
     if (projectIds.isEmpty()) {
+        m_finished = true;
         emit resolved(m_tasks);
         return;
     }
@@ -24,15 +33,28 @@ void ModDependencyResolver::resolve(const QStringList& projectIds, const QString
         resolveProject(id, true);
 }
 
-void ModDependencyResolver::resolveProject(const QString& projectId,
-                                           bool userSelected)
+QJsonObject ModDependencyResolver::pickVersion(const QJsonArray& versions)
 {
-    if (m_visitedProjects.contains(projectId)) {
+    for (const QJsonValue& v : versions) {
+        const QJsonObject o = v.toObject();
+        if (o.value("version_type").toString() == "release") return o;
+    }
+    return versions.isEmpty() ? QJsonObject() : versions.first().toObject();
+}
+
+void ModDependencyResolver::failWith(const QString& message)
+{
+    if (m_finished) return;
+    m_finished = true;
+    emit error(message);
+}
+
+void ModDependencyResolver::resolveProject(const QString& projectId, bool userSelected)
+{
+    if (m_visitedProjects.contains(projectId) || m_taskProjects.contains(projectId)) {
         if (userSelected) {
-            for (ModDownloadTask& t : m_tasks) {
-                if (t.projectId == projectId)
-                    t.userSelected = true;
-            }
+            for (ModDownloadTask& t : m_tasks)
+                if (t.projectId == projectId) t.userSelected = true;
         }
         return;
     }
@@ -41,64 +63,59 @@ void ModDependencyResolver::resolveProject(const QString& projectId,
     m_pending++;
 
     m_api->requestVersions(
-        projectId,
-        m_gameVersion,
-        m_loader,
+        projectId, m_gameVersion, m_loader,
         [this, userSelected, projectId](const QJsonArray& versions) {
+            if (m_finished) return;
 
-            if (versions.isEmpty()) {
-                if (userSelected) {
-                    m_hasError = true;
-
-                    emit error(
-                        QString("Мод %1 не имеет версии для Minecraft %2 / %3")
-                            .arg(projectId)
-                            .arg(m_gameVersion)
-                            .arg(m_loader)
-                        );
-                } else {
-                    emit warning(
-                        QString("Dependency %1 has no compatible version for %2 / %3")
-                            .arg(projectId)
-                            .arg(m_gameVersion)
-                            .arg(m_loader)
-                        );
-                }
+            const QJsonObject chosen = pickVersion(versions);
+            if (chosen.isEmpty()) {
+                const QString msg = QString("Мод «%1» не имеет версии для Minecraft %2 (%3)")
+                                        .arg(displayName(projectId), m_gameVersion, m_loader);
+                if (userSelected) { failWith(msg); return; }
+                emit warning("Зависимость пропущена: " + msg);
             } else {
-                addVersion(versions.first().toObject(), userSelected);
+                addVersion(chosen, userSelected);
             }
-
-            m_pending--;
-            finishIfDone();
+            requestFinished();
         },
-        this // context: авто-отключение колбэка, если резолвер уже удалён
-        );
+        [this, userSelected, projectId](const QString& err) {
+            if (m_finished) return;
+            const QString msg = QString("Не удалось получить версии мода «%1»: %2").arg(displayName(projectId), err);
+            if (userSelected) { failWith(msg); return; }
+            emit warning(msg);
+            requestFinished();
+        },
+        this);
 }
 
 void ModDependencyResolver::resolveVersion(const QString& versionId, bool userSelected)
 {
-    if (m_visitedVersions.contains(versionId)) return;
+    if (m_visitedVersions.contains(versionId) || m_requestedVersions.contains(versionId)) return;
+    m_requestedVersions.insert(versionId);
     m_pending++;
 
-    m_api->requestVersion(versionId, [this, userSelected](const QJsonObject& version) {
-        if (!version.isEmpty()) addVersion(version, userSelected);
-        m_pending--;
-        finishIfDone();
-    }, this); // context: авто-отключение колбэка, если резолвер уже удалён
+    m_api->requestVersion(
+        versionId,
+        [this, userSelected](const QJsonObject& version) {
+            if (m_finished) return;
+            if (!version.isEmpty()) addVersion(version, userSelected);
+            requestFinished();
+        },
+        [this](const QString& err) {
+            if (m_finished) return;
+            emit warning("Не удалось получить версию зависимости: " + err);
+            requestFinished();
+        },
+        this);
 }
 
-void ModDependencyResolver::finishIfDone()
+void ModDependencyResolver::requestFinished()
 {
-    if (m_pending > 0)
-        return;
+    m_pending--;
+    if (m_finished || m_pending > 0) return;
 
-    if (m_hasError)
-        return;
-
-    emit progress("Dependencies resolved",
-                  m_tasks.size(),
-                  m_tasks.size());
-
+    m_finished = true;
+    emit progress("Зависимости найдены", m_tasks.size(), m_tasks.size());
     emit resolved(m_tasks);
 }
 
@@ -108,23 +125,36 @@ void ModDependencyResolver::addVersion(const QJsonObject& version, bool userSele
     if (m_visitedVersions.contains(versionId)) return;
     m_visitedVersions.insert(versionId);
 
+    const QString projectId = version["project_id"].toString();
+
+    if (!projectId.isEmpty() && m_taskProjects.contains(projectId)) {
+        if (userSelected)
+            for (ModDownloadTask& t : m_tasks)
+                if (t.projectId == projectId) t.userSelected = true;
+        return;
+    }
+
     const QJsonArray files = version["files"].toArray();
     QJsonObject primary;
     for (const QJsonValue& fv : files) {
-        QJsonObject fo = fv.toObject();
+        const QJsonObject fo = fv.toObject();
         if (primary.isEmpty()) primary = fo;
         if (fo["primary"].toBool()) { primary = fo; break; }
     }
     if (primary.isEmpty()) return;
 
     ModDownloadTask task;
-    task.projectId = version["project_id"].toString();
+    task.projectId = projectId;
     task.versionId = versionId;
     task.fileName = primary["filename"].toString();
     task.url = primary["url"].toString();
+    task.sha1 = primary["hashes"].toObject()["sha1"].toString();
     task.size = (qint64)primary["size"].toDouble();
     task.userSelected = userSelected;
     m_tasks.append(task);
+    if (!projectId.isEmpty()) m_taskProjects.insert(projectId);
+
+    emit progress("Поиск зависимостей", m_tasks.size(), m_tasks.size() + m_pending);
 
     const QJsonArray deps = version["dependencies"].toArray();
     for (const QJsonValue& dv : deps) {
@@ -133,7 +163,7 @@ void ModDependencyResolver::addVersion(const QJsonObject& version, bool userSele
 
         if (type == "embedded") continue;
         if (type == "incompatible") {
-            emit warning("Incompatible with: " + d["project_id"].toString());
+            emit warning("Несовместим с: " + displayName(d["project_id"].toString()));
             continue;
         }
         if (type == "optional" && !m_includeOptional) continue;

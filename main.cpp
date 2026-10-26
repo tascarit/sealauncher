@@ -14,6 +14,48 @@
 #include <QStatusBar>
 #include <QQmlContext>
 #include <QTimer>
+#include <QMessageBox>
+#include <QLocalServer>
+#include <QLocalSocket>
+
+class CloseGuard : public QObject {
+public:
+    CloseGuard(MinecraftHandler* mh, SettingsController* sc, QQuickView* view)
+        : QObject(view), m_mh(mh), m_sc(sc), m_view(view) {}
+protected:
+    bool eventFilter(QObject* obj, QEvent* ev) override {
+        if (obj == m_view && ev->type() == QEvent::Close) {
+            if (m_mh->busy()) {
+                ev->ignore();
+                m_view->hide();
+                m_sc->notify(QStringLiteral("SeaLauncher"),
+                             QStringLiteral("Установка продолжается в фоне. Откройте лаунчер из значка в трее."));
+                return true;
+            }
+            QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+        }
+        return QObject::eventFilter(obj, ev);
+    }
+private:
+    MinecraftHandler* m_mh;
+    SettingsController* m_sc;
+    QQuickView* m_view;
+};
+
+namespace {
+const QString kInstanceKey = QStringLiteral("SeaLauncher-single-instance");
+
+bool notifyRunningInstance()
+{
+    QLocalSocket socket;
+    socket.connectToServer(kInstanceKey);
+    if (!socket.waitForConnected(300)) return false;
+    socket.write("show");
+    socket.waitForBytesWritten(300);
+    socket.disconnectFromServer();
+    return true;
+}
+}
 
 int main(int argc, char *argv[])
 {
@@ -22,11 +64,19 @@ int main(int argc, char *argv[])
     SetCurrentProcessExplicitAppUserModelID(L"SeaLauncher");
 
     QApplication a(argc, argv);
-    QQuickView view;
+    a.setApplicationName(QString("SeaLauncher"));
+    a.setWindowIcon(QIcon(":/resources/dolphin.png"));
+    a.setQuitOnLastWindowClosed(false);
+
+    if (notifyRunningInstance()) return 0;
+
+    QLocalServer instanceServer;
+    QLocalServer::removeServer(kInstanceKey);
+    instanceServer.listen(kInstanceKey);
 
     QQuickStyle::setStyle("Basic");
-    a.setWindowIcon(QIcon(":/resources/dolphin.png"));
-    a.setApplicationName(QString("SeaLauncher"));
+
+    QQuickView view;
 
     SettingsManager sm;
     SettingsController sc;
@@ -35,6 +85,9 @@ int main(int argc, char *argv[])
     ModrinthApi modrinthApi;
     LocalBuildsManager localBuildsManager(&sm, &modrinthApi);
     localBuildsManager.setMinecraftHandler(&mh);
+
+    sm.setMaxRam(qMax(2048, static_cast<int>(sc.getNativeRam()) - 1024));
+    mh.Initialize(&view, &q, &sm, &sc);
 
     view.setResizeMode(QQuickView::SizeRootObjectToView);
     view.setMinimumSize(QSize(900, 800));
@@ -52,24 +105,35 @@ int main(int argc, char *argv[])
 
     view.setSource(QUrl("qrc:/qml/Main.qml"));
 
+    if (view.status() == QQuickView::Error || !view.rootObject()) {
+        QString details;
+        for (const auto& err : view.errors()) details += err.toString() + "\n";
+        QMessageBox::critical(nullptr, "SeaLauncher",
+                              "Не удалось загрузить интерфейс лаунчера.\n\n" + details);
+        return 1;
+    }
+
     sc.setupTrayIcon(&view);
 
-    QObject::connect(&mh, &MinecraftHandler::minecraftStarted, [&]() {
-        view.hide();
-    });
-
-    QObject::connect(&mh, &MinecraftHandler::minecraftStopped, [&]() {
+    auto bringToFront = [&view]() {
         view.show();
         view.raise();
         view.requestActivate();
+    };
+
+    QObject::connect(&mh, &MinecraftHandler::minecraftStarted, &view, [&view]() { view.hide(); });
+    QObject::connect(&mh, &MinecraftHandler::minecraftStopped, &view, bringToFront);
+
+    QObject::connect(&instanceServer, &QLocalServer::newConnection, &view, [&]() {
+        while (QLocalSocket* s = instanceServer.nextPendingConnection()) {
+            s->deleteLater();
+            bringToFront();
+        }
     });
 
+    view.installEventFilter(new CloseGuard(&mh, &sc, &view));
+
     view.show();
-
-    mh.Initialize(&view, &q, &sm, &sc);
-    //mh.reCheckBuilds(QString("Krevetka"), QString("21.1.250"), QString("neoforge"), QString("1.21.1"), QString("https://github.com/tascarit/KrevetkaPack/releases/download/0.1/Krevetka.zip"), 1, "0.1");
-
-    sm.setMaxRam(sc.getNativeRam());
     sc.registerSysButtonHandlers(&view);
 
     return QApplication::exec();

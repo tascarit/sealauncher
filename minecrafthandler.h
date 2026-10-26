@@ -6,6 +6,7 @@
 #include "QmlHandler.h"
 #include "SettingsManager.h"
 #include "SettingsController.h"
+#include "downloadmanager.h"
 
 #include <QObject>
 #include <QQuickItem>
@@ -16,145 +17,201 @@
 #include <QFile>
 #include <QJsonObject>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QTimer>
-#include <QJsonArray>
 #include <QProcess>
-#include <QTextStream>
-#include <QRegularExpression>
 #include <QElapsedTimer>
-#include <QHash>
-#include <QThread>
 #include <QDesktopServices>
 
-#include <private/qzipreader_p.h>
-
-struct Chunk { qint64 start; qint64 end; };
+#include <functional>
+#include <memory>
 
 class MinecraftHandler: public QObject
 {
     Q_OBJECT
 
-    Q_PROPERTY(bool buildExists READ buildExists WRITE setBuildExists NOTIFY buildExistsChanged)
-    Q_PROPERTY(bool updateAvailable READ updateAvailable WRITE setUpdateAvailable NOTIFY updateAvailableChanged)
-    Q_PROPERTY(bool installation READ installation WRITE setInstallation NOTIFY installationChanged)
+    Q_PROPERTY(bool buildExists READ buildExists NOTIFY buildExistsChanged)
+    Q_PROPERTY(bool updateAvailable READ updateAvailable NOTIFY updateAvailableChanged)
+    Q_PROPERTY(bool installation READ installation NOTIFY installationChanged)
+    Q_PROPERTY(bool canDelete READ canDelete NOTIFY canDeleteChanged)
+    Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
+    Q_PROPERTY(bool offline READ offline NOTIFY offlineChanged)
+
 public:
     explicit MinecraftHandler(QObject *parent = nullptr);
     ~MinecraftHandler() override;
 
     bool buildExists() const { return m_buildExists; }
     bool updateAvailable() const { return m_updateAvailable; }
-    bool installation () const { return m_installation; }
-
-    void setBuildExists(bool);
+    bool installation() const { return m_installation; }
+    bool canDelete() const { return m_canDelete; }
+    bool busy() const { return m_busy; }
+    bool offline() const { return m_offline; }
 
     void Initialize(QQuickView*, QmlHandler*, SettingsManager*, SettingsController*);
 
-    QString downloadNeoforge(const QString&);
-    QString installNeoforge(const QString&);
-
-    void installVanilla(const QString& mcVersion);
-    void installFabric(const QString& mcVersion, const QString& loaderVersion);
-    void installForge(const QString& mcVersion, const QString& forgeVersion);
-
-    void downloadVanillaFiles(const QString& gamePath, const QString& mcVersion);
-    void downloadLibrariesFromJson(const QJsonObject& json, const QString& gamePath);
-    void downloadVanillaLibraries(const QString& gamePath);
-    void downloadAssets(const QString& gamePath, const QString& assetIndexId);
-    void downloadFileParallel(const QString& url, const QString& savePath, int chunkSizeMB = 16, int maxParallel = 8);
-    void downloadSingleStream(const QString& url, const QString& savePath, QNetworkAccessManager* mgr);
-    void downloadChunks(QNetworkAccessManager* mgr, const QString& url, const QString& savePath, const QList<Chunk>& chunks, int maxParallel);
-    bool mergeFiles(const QStringList& parts, const QString& outputPath);
-    bool extractZip(const QString& zipPath, const QString& targetDir);
-    void installModpack(const QString& baseUrl, const QString& gamePath, int partCount = 1);
-    void onAllPartsDownloaded(const QStringList& partPaths, const QString& gamePath, int partCount);
     QString getVersionId() const;
-    QString getVersionJsonPath(const QString&) const;
-
-    void ensureLauncherProfile(const QString& gameDir);
-    void ensureNarratorDisabled(const QString& gamePath);
-
-    void startInstallation(const QString& gamePath);
-    void stopInstallation(const QString& gamePath);
-    void checkInstallation(const QString& gamePath);
-
-    QStringList parseVersionJson(const QString&);
+    QStringList parseVersionJson(const QString& gamePath);
     bool launchMinecraft(const QStringList&, const QString&);
+    void ensureLauncherProfile(const QString& gameDir);
+    static bool isJvmArgSupportedFor(const QString& arg, int javaMajor);
 
     Q_INVOKABLE void mainButtonClick();
     Q_INVOKABLE void deleteCurrentBuild();
     Q_INVOKABLE void fetchBuildsList();
     Q_INVOKABLE void fetchNews();
     Q_INVOKABLE void openLauncherDir();
-    Q_INVOKABLE void reCheckBuilds(const QString& build, const QString& version, const QString& loader, const QString& mcVer, const QString& git, const int parts, const QString& packVer);
-    Q_INVOKABLE void installLocalBuild(const QString& buildName, const QString& mcVersion, const QString& loader, const QString& loaderVersion);
+    Q_INVOKABLE void openBuildDir();
+    Q_INVOKABLE void reCheckBuilds(const QString& build, const QString& version, const QString& loader,
+                                   const QString& mcVer, const QString& git, const int parts, const QString& packVer);
+    Q_INVOKABLE void installLocalBuild(const QString& buildName, const QString& mcVersion,
+                                       const QString& loader, const QString& loaderVersion);
+
+    Q_INVOKABLE void cancelInstallation();
+    Q_INVOKABLE void retryLastOperation();
+    Q_INVOKABLE void discardFailedOperation();
 
 signals:
     void buildExistsChanged();
     void updateAvailableChanged();
     void installationChanged();
-
-    void downloadProgress(qint64, qint64);
-    void downloadFinished(const QString& path);
-    void finished();
-
-    void installFinished();
-    void downloadFailed(const QString& path, const QString& reason);
+    void canDeleteChanged();
+    void busyChanged();
+    void offlineChanged();
 
     void buildsListReady(const QJsonArray& builds);
     void newsReady(const QJsonArray& news);
     void buildsChanged();
     void minecraftStarted();
     void minecraftStopped();
+
+    void installSucceeded(const QString& name);
+    void installFailed(const QString& name, const QString& message, bool canRetry);
+    void installAbandoned(const QString& name);
+
 private:
-    QQuickView *view;
-    QmlHandler *q;
+    using Cont = std::function<void()>;
+    using FetchCb = std::function<void(bool ok, const QByteArray& data, const QString& error)>;
+
+    struct BuildSpec {
+        QString name;
+        QString loader;
+        QString loaderVersion;
+        QString mcVersion;
+        QString archiveLink;
+        QString packVersion = QStringLiteral("0.1");
+        int parts = 1;
+    };
+    struct FetchCtx;
+    struct MergeState;
+    struct ExtractState;
+
+    void refreshSelectedState();
+    void setBuildExists(bool v);
+    void setUpdateAvailable(bool v);
+    void setInstallation(bool v);
+    void setCanDelete(bool v);
+    void setBusy(bool v);
+    void setOffline(bool v);
+
+    QString gamePathFor(const QString& name) const;
+    static QString versionIdFor(const BuildSpec& s);
+    QString readInstalledPackVersion(const QString& gamePath) const;
+    bool loaderAlreadyInstalled(const QString& gamePath, const BuildSpec& spec) const;
+    void writeBuildMeta(const QString& gamePath, const BuildSpec& spec);
+    void prepareForUpdate(const QString& gamePath, bool keepLoader);
+    void writeInstallMarker(const QString& gamePath) const;
+    void removeInstallMarker(const QString& gamePath) const;
+
+    void beginInstall(const BuildSpec& spec, bool update);
+    void endJob();
+    void failJob(const QString& title, const QString& message, const QString& details, bool canRetry);
+    void finishInstall();
+    void defer(quint64 gen, std::function<void()> fn);
+    void reportProgress(const QString& stage, const QString& details, double progress, bool immediate = false);
+    void flushProgress();
+
+    void stageArchive();
+    void downloadNextPart();
+    void mergeParts();
+    void mergeStep();
+    void stagePrepare();
+    void stageLoader();
+    void stageVanilla(const Cont& next);
+    void stageVanillaFiles(const Cont& next);
+    void stageAssets(const QJsonObject& vanillaJson, const Cont& next);
+    void stageFabric();
+    void stageForge();
+    void stageNeoforge();
+    void stageExtract();
+    void startExtract(const QString& zipPath, const QString& targetDir);
+    void extractStep();
+    void discardArchive();
+
+    void runBatch(const QString& title, const QList<DownloadItem>& items, int parallel, const Cont& onOk);
+    void runInstaller(const QString& installerPath, const QString& label, const Cont& onSuccess);
+    QList<DownloadItem> libraryItems(const QJsonObject& json, const QString& gamePath) const;
+
+    void fetchText(const QString& url, int retries, bool bindToJob, FetchCb cb);
+    void fetchAttempt(const std::shared_ptr<FetchCtx>& ctx);
+    void scheduleFetchRetry();
+
+    QByteArray loadCache(const QString& fileName) const;
+    void saveCache(const QString& fileName, const QByteArray& data) const;
+
+    QQuickView *view = nullptr;
+    QmlHandler *q = nullptr;
     QNetworkAccessManager *m_manager = nullptr;
     SettingsManager *sm = nullptr;
     SettingsController *sc = nullptr;
 
-    bool m_buildExists;
-    bool m_installation;
-    int m_javaMajorVersion = -1;
-    QString m_buildName;
-    QString m_buildLoader;
-    QString m_buildVersion;
-    QString m_mcVersion;
-    QString m_buildArchiveLink;
-    int m_archiveParts;
-    QFile *m_file;
-    QString m_launchJavaPath;
+    BuildSpec m_sel;
+    QString m_installedPackVersion;
+    bool m_buildExists = false;
+    bool m_updateAvailable = false;
+    bool m_installation = false;
+    bool m_canDelete = false;
+    bool m_busy = false;
+    bool m_offline = false;
 
-    QProcess* m_minecraftProcess = nullptr;
+    BuildSpec m_job;
+    QString m_jobPath;
+    QString m_tmpDir;
+    QString m_zipPath;
+    QStringList m_partPaths;
+    QStringList m_partUrls;
+    int m_partIndex = 0;
+    bool m_jobUpdate = false;
+    bool m_jobSkipLoader = false;
+    bool m_installing = false;
+    int m_installerAttempt = 0;
+    quint64 m_opGen = 1;
+
+    DownloadBatch* m_batch = nullptr;
+    RangedDownload* m_ranged = nullptr;
+    QProcess* m_installerProc = nullptr;
+    std::shared_ptr<MergeState> m_merge;
+    std::shared_ptr<ExtractState> m_extract;
+
+    std::function<void()> m_retryFn;
+    QString m_failedJobName;
+
     QTimer* m_progressThrottle = nullptr;
+    QElapsedTimer m_progressClock;
     QString m_pendingStage;
     QString m_pendingDetails;
-    double  m_pendingProgress = 0.0;
-    bool    m_hasPendingUpdate = false;
+    double m_pendingProgress = -1.0;
+    bool m_hasPendingUpdate = false;
 
-    bool m_updateAvailable = false;
+    bool m_fetchingBuilds = false;
+    bool m_fetchingNews = false;
+    QTimer* m_fetchRetryTimer = nullptr;
 
-    QString m_packVersion;
-    QString m_installedPackVersion;
-
-    QString readInstalledPackVersion(const QString& gamePath) const;
-    bool loaderAlreadyInstalled(const QString& gamePath) const;
-    void setUpdateAvailable(bool v);
-    void setInstallation(bool v);
-
-    void finalizeInstall(const QString& gamePath);
-
-    void writeBuildMeta(const QString& gamePath);
-    void prepareForUpdate(const QString& gamePath);
-
-    QString fetchUrl(const QString& url, int timeoutMs = 15000, int retries = 3);
-    bool downloadFile(const QString& url, const QString& savePath, int timeoutMs = 20000, int retries = 3);
-    QString getVersionJsonPath(const QString& gamePath, const QString& versionId);
-
-    int detectJavaMajorVersion();
-    static bool isJvmArgSupported(const QString& arg, int javaMajor);
+    QProcess* m_minecraftProcess = nullptr;
+    QString m_launchJavaPath;
 };
 
-#endif // MINECRAFTHANDLER_H
+#endif

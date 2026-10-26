@@ -4,37 +4,105 @@
 #include <QStandardPaths>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QSaveFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QRegularExpression>
+#include <QSet>
+#include <QVariantMap>
+#include <algorithm>
 
-namespace fs = std::filesystem;
+int SettingsManager::majorFromReleaseFile(const QString& javaExePath)
+{
+    QDir home(QFileInfo(javaExePath).absolutePath());
+    if (!home.cdUp()) return -1;
+
+    QFile f(home.absoluteFilePath(QStringLiteral("release")));
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return -1;
+
+    static const QRegularExpression re(QStringLiteral(R"(JAVA_VERSION\s*=\s*"?(\d+)(?:\.(\d+))?)"));
+    const QRegularExpressionMatch m = re.match(QString::fromUtf8(f.readAll()));
+    if (!m.hasMatch()) return -1;
+
+    int major = m.captured(1).toInt();
+    if (major == 1 && !m.captured(2).isEmpty()) major = m.captured(2).toInt();
+    return major > 0 ? major : -1;
+}
+
+int SettingsManager::getJavaMajorVersion(const QString& path) const
+{
+    if (path.isEmpty()) return -1;
+    const QFileInfo fi(path);
+    if (!fi.exists() || !fi.isFile()) return -1;
+
+    const QString key = fi.absoluteFilePath();
+    const auto cached = m_majorCache.constFind(key);
+    if (cached != m_majorCache.constEnd()) return cached.value();
+
+    int major = majorFromReleaseFile(path);
+
+    if (major <= 0) {
+        QProcess p;
+        p.start(path, {"-version"});
+        if (!p.waitForFinished(3000)) { p.kill(); return -1; }
+
+        const QString out = QString::fromLocal8Bit(p.readAllStandardError())
+                            + QString::fromLocal8Bit(p.readAllStandardOutput());
+        static const QRegularExpression re(R"(version\s+"?(\d+)(?:\.(\d+))?[\._\s"])",
+                                           QRegularExpression::CaseInsensitiveOption);
+        const auto m = re.match(out);
+        if (!m.hasMatch()) return -1;
+
+        major = m.captured(1).toInt();
+        if (major == 1 && !m.captured(2).isEmpty()) major = m.captured(2).toInt();
+    }
+
+    if (major > 0) m_majorCache.insert(key, major);
+    return major;
+}
+
+void SettingsManager::collectJavaExecutables(const QString& root, int depth, QStringList& out)
+{
+    const QDir dir(root);
+    if (!dir.exists()) return;
+
+    const QString exe = dir.absoluteFilePath(QStringLiteral("bin/java.exe"));
+    if (QFileInfo::exists(exe)) { out << exe; return; }
+
+    if (depth <= 0) return;
+    const QStringList subs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString& sub : subs)
+        collectJavaExecutables(dir.absoluteFilePath(sub), depth - 1, out);
+}
 
 QList<QPair<QString, int>> SettingsManager::getAllJavaInstallations() const
 {
     if (m_javaCacheValid) return m_javaCache;
 
     m_javaCache.clear();
+    QSet<QString> seen;
+
     auto tryAdd = [&](const QString& path) {
         if (path.isEmpty()) return;
-        QFileInfo fi(path);
+        const QFileInfo fi(path);
         if (!fi.exists() || !fi.isFile()) return;
 
         const QString canonical = fi.canonicalFilePath();
-        for (const auto& c : m_javaCache)
-            if (QFileInfo(c.first).canonicalFilePath() == canonical) return;
+        if (seen.contains(canonical)) return;
+        seen.insert(canonical);
 
-        int major = getJavaMajorVersion(path);
+        const int major = getJavaMajorVersion(path);
         if (major > 0) m_javaCache << qMakePair(fi.absoluteFilePath(), major);
     };
 
     for (const QString& var : {"JAVA_HOME", "JDK_HOME", "JRE_HOME"}) {
-        QString base = qEnvironmentVariable(var.toUtf8().constData());
+        const QString base = qEnvironmentVariable(var.toUtf8().constData());
         if (!base.isEmpty()) tryAdd(base + "/bin/java.exe");
     }
 
-    QString fromPath = QStandardPaths::findExecutable("java");
+    const QString fromPath = QStandardPaths::findExecutable("java");
     if (!fromPath.isEmpty() && !fromPath.contains("javapath", Qt::CaseInsensitive))
         tryAdd(fromPath);
 
@@ -43,25 +111,25 @@ QList<QPair<QString, int>> SettingsManager::getAllJavaInstallations() const
         "C:/Program Files/Microsoft", "C:/Program Files/BellSoft",
         "C:/Program Files/Amazon Corretto", "C:/Program Files/Zulu",
         "C:/Program Files/Oracle", "C:/Program Files/IBM",
-        "C:/Program Files (x86)/Java", "C:/Program Files (x86)/Eclipse Adoptium"
+        "C:/Program Files/Semeru", "C:/Program Files/Temurin",
+        "C:/Program Files (x86)/Java", "C:/Program Files (x86)/Eclipse Adoptium",
+        "C:/Program Files (x86)/Minecraft Launcher/runtime",
+        "C:/Program Files/Minecraft Launcher/runtime"
     };
     const QString userProfile = qEnvironmentVariable("USERPROFILE");
     if (!userProfile.isEmpty())
         roots << userProfile + "/.jdks" << userProfile + "/scoop/apps";
     const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
     if (!localAppData.isEmpty())
-        roots << localAppData + "/Programs/Eclipse Adoptium"
-              << localAppData + "/Programs/Zulu";
+        roots << localAppData + "/Programs/Eclipse Adoptium" << localAppData + "/Programs/Zulu";
+    const QString appData = qEnvironmentVariable("APPDATA");
+    if (!appData.isEmpty())
+        roots << appData + "/.minecraft/runtime";
 
     for (const QString& root : roots) {
-        if (!QDir(root).exists()) continue;
-        QDirIterator it(root, {"java.exe"}, QDir::Files, QDirIterator::Subdirectories);
-        while (it.hasNext()) {
-            const QString path = it.next();
-            const QString rel = QDir(root).relativeFilePath(path);
-            if (rel.count('/') + rel.count('\\') > 5) continue;
-            tryAdd(path);
-        }
+        QStringList found;
+        collectJavaExecutables(root, 3, found);
+        for (const QString& exe : found) tryAdd(exe);
     }
 
     std::sort(m_javaCache.begin(), m_javaCache.end(),
@@ -75,15 +143,12 @@ QList<QPair<QString, int>> SettingsManager::getAllJavaInstallations() const
 QString SettingsManager::findJavaByMajor(int requiredMajor) const
 {
     const auto all = getAllJavaInstallations();
-    if (all.isEmpty()) return "";
+    if (all.isEmpty()) return QString();
 
     for (const auto& j : all)
-        if (j.second == requiredMajor)
-            return j.first;
-
+        if (j.second == requiredMajor) return j.first;
     for (const auto& j : all)
-        if (j.second > requiredMajor)
-            return j.first;
+        if (j.second > requiredMajor) return j.first;
 
     return all.last().first;
 }
@@ -91,40 +156,56 @@ QString SettingsManager::findJavaByMajor(int requiredMajor) const
 void SettingsManager::invalidateJavaCache()
 {
     m_javaCacheValid = false;
+    m_majorCache.clear();
+}
+
+void SettingsManager::rescanJava()
+{
+    invalidateJavaCache();
+    getAllJavaInstallations();
+    emit javaListChanged();
+}
+
+int SettingsManager::javaMajorOf(const QString& path) const
+{
+    return getJavaMajorVersion(path);
+}
+
+QVariantList SettingsManager::detectedJavas() const
+{
+    QVariantList list;
+    const auto all = getAllJavaInstallations();
+    for (int i = all.size() - 1; i >= 0; --i) {
+        QVariantMap m;
+        m["path"] = all.at(i).first;
+        m["major"] = all.at(i).second;
+        list << m;
+    }
+    return list;
 }
 
 bool SettingsManager::isValidJavaExecutable(const QString& path)
 {
     if (path.isEmpty()) return false;
-    QFileInfo fi(path);
+    const QFileInfo fi(path);
     if (!fi.exists() || !fi.isFile()) return false;
 
     QProcess p;
     p.start(path, {"-version"});
-    if (!p.waitForFinished(3000)) return false;
-    QString out = QString::fromLocal8Bit(p.readAllStandardError())
-                  + QString::fromLocal8Bit(p.readAllStandardOutput());
+    if (!p.waitForFinished(3000)) { p.kill(); return false; }
+    const QString out = QString::fromLocal8Bit(p.readAllStandardError())
+                        + QString::fromLocal8Bit(p.readAllStandardOutput());
     return out.contains("version", Qt::CaseInsensitive);
 }
 
 QString SettingsManager::detectJavaPath() const
 {
-    // Раньше здесь был полный дубль сканирования из getAllJavaInstallations()
-    // (те же самые директории, то же самое синхронное "java -version" на
-    // каждый найденный java.exe), но БЕЗ кэша. Из-за этого при старте
-    // приложения полное рекурсивное сканирование диска с блокирующим
-    // запуском процессов выполнялось дважды подряд (load() -> getPaths(),
-    // затем ensureLatestJava()), заметно замедляя запуск. Теперь переиспользуем
-    // getAllJavaInstallations() — она кэширует результат (m_javaCacheValid),
-    // так что повторный вызов почти бесплатен.
     const auto all = getAllJavaInstallations();
     if (all.isEmpty()) {
         newDebug() << "[Java] No Java installations found";
-        return "";
+        return QString();
     }
 
-    // getAllJavaInstallations() сортирует по возрастанию major-версии,
-    // поэтому последний элемент — самая новая найденная Java.
     newDebug() << "[Java] Found" << all.size() << "installation(s):";
     for (const auto& c : all)
         newDebug() << "  Java" << c.second << "→" << c.first;
@@ -134,8 +215,6 @@ QString SettingsManager::detectJavaPath() const
 
 void SettingsManager::ensureLatestJava()
 {
-    newDebug() << "[Java] Scanning for latest Java...";
-
     const QString latest = detectJavaPath();
     if (latest.isEmpty()) {
         newDebug() << "[Java] No Java found, keeping current path:" << m_javaPath;
@@ -145,127 +224,110 @@ void SettingsManager::ensureLatestJava()
     const int latestMajor = getJavaMajorVersion(latest);
     const int currentMajor = getJavaMajorVersion(m_javaPath);
 
-    newDebug() << "[Java] Latest found: Java" << latestMajor << "at" << latest;
-    newDebug() << "[Java] Currently set: Java" << currentMajor
-               << "at" << (m_javaPath.isEmpty() ? "(empty)" : m_javaPath);
-
     if (latestMajor > currentMajor || currentMajor < 0) {
-        newDebug() << "[Java] Auto-upgrading to Java" << latestMajor;
+        newDebug() << "[Java] Auto-upgrading to Java" << latestMajor << "at" << latest;
         m_javaPath = latest;
-        save();
         emit javaPathChanged();
-    } else {
-        newDebug() << "[Java] Current Java is already the latest available";
+        scheduleSave();
     }
 }
 
-int SettingsManager::getJavaMajorVersion(const QString& path) const
+SettingsManager::SettingsManager(QObject *parent)
+    : QObject(parent)
 {
-    if (path.isEmpty()) return -1;
-    QFileInfo fi(path);
-    if (!fi.exists() || !fi.isFile()) return -1;
+    m_saveTimer.setSingleShot(true);
+    m_saveTimer.setInterval(400);
+    connect(&m_saveTimer, &QTimer::timeout, this, &SettingsManager::save);
 
-    QProcess p;
-    p.start(path, {"-version"});
-    if (!p.waitForFinished(3000)) return -1;
-
-    QString out = QString::fromLocal8Bit(p.readAllStandardError())
-                  + QString::fromLocal8Bit(p.readAllStandardOutput());
-
-    QRegularExpression re(R"(version\s+"?(\d+)(?:\.(\d+))?[\._\s"])",
-                          QRegularExpression::CaseInsensitiveOption);
-    auto m = re.match(out);
-    if (!m.hasMatch()) return -1;
-
-    int major = m.captured(1).toInt();
-    if (major == 1 && !m.captured(2).isEmpty())
-        major = m.captured(2).toInt();
-    return major;
+    load();
+    ensureLatestJava();
 }
 
-void SettingsManager::CreateTemplateFile(){
-    const QString path = configFilePath();
-    const QString dir = QFileInfo(path).absolutePath();
+SettingsManager::~SettingsManager()
+{
+    save();
+}
 
-    QDir().mkpath(dir);
+QString SettingsManager::configFilePath() const
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/settings.json";
+}
 
+void SettingsManager::scheduleSave()
+{
+    if (m_loading) return;
+    m_saveTimer.start();
+}
+
+void SettingsManager::writeTemplateFile()
+{
     QJsonObject o;
-    o["version"] = 1;
+    o["version"] = VERSION;
     o["username"] = "";
     o["ramMb"] = 4096;
     o["javaPath"] = "";
     o["gameDir"] = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/modpacks";
     o["jvmArgs"] = "";
     o["maxRam"] = 4096;
-    o["buildsServerUrl"] = "";
-    o["newsServerUrl"] = "";
 
-    QFile f(path);
-
-    if (!f.open(QIODevice::WriteOnly)){
+    QSaveFile f(configFilePath());
+    if (!f.open(QIODevice::WriteOnly)) {
         qWarning() << "ERROR: Failed to open file to save settings";
         return;
     }
-
     f.write(QJsonDocument(o).toJson());
+    f.commit();
 }
 
-SettingsManager::SettingsManager(QObject *parent)
-    :QObject(parent)
+void SettingsManager::load()
 {
-    load();
-    ensureLatestJava();
-}
-
-SettingsManager::~SettingsManager(){
-    save();
-}
-
-QString SettingsManager::configFilePath() const {
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    return dir + "/settings.json";
-}
-
-void SettingsManager::load(){
     m_loading = true;
     const QString path = configFilePath();
-    const QString dir = QFileInfo(path).absolutePath();
+    QDir().mkpath(QFileInfo(path).absolutePath());
 
-    auto getPaths = [this](){
-        if (m_javaPath == "")
-            m_javaPath = detectJavaPath();
-        if (m_gameDir == "")
+    auto fillDefaults = [this]() {
+        if (m_javaPath.isEmpty()) m_javaPath = detectJavaPath();
+        if (m_gameDir.isEmpty())
             m_gameDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/modpacks";
     };
 
-    QDir().mkpath(dir);
-
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
-        CreateTemplateFile();
-        f.open(QIODevice::ReadOnly);
+        writeTemplateFile();
         newDebug() << "Debug: No config file was found, using standard values";
-        getPaths();
+        fillDefaults();
         m_loading = false;
         return;
     }
 
-    const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+    const QByteArray raw = f.readAll();
+    f.close();
+
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(raw, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+        newDebug() << "[Settings] settings.json is corrupt:" << err.errorString() << "- backing up";
+        QFile::remove(path + ".corrupt");
+        QFile::copy(path, path + ".corrupt");
+    }
+    const QJsonObject o = doc.object();
 
     m_username = o.value("username").toString(m_username);
     m_ramMb    = o.value("ramMb").toInt(m_ramMb);
     m_javaPath = o.value("javaPath").toString(m_javaPath);
     m_gameDir  = o.value("gameDir").toString(m_gameDir);
     m_jvmArgs  = o.value("jvmArgs").toString(m_jvmArgs);
-    m_version = o.value("version").toInt(m_version);
-    m_maxRam = o.value("maxRam").toInt(m_maxRam);
+    m_version  = o.value("version").toInt(m_version);
+    m_maxRam   = o.value("maxRam").toInt(m_maxRam);
+    m_lastBuild = o.value("lastBuild").toString(m_lastBuild);
 
     if (m_ramMb < 2048) m_ramMb = 2048;
+    if (m_maxRam >= 2048 && m_ramMb > m_maxRam) m_ramMb = m_maxRam;
 
     newDebug() << "Debug: Settings loaded from: " << path;
-    m_loading = false;
 
-    getPaths();
+    fillDefaults();
+    m_loading = false;
 
     emit maxRamChanged();
     emit usernameChanged();
@@ -276,14 +338,10 @@ void SettingsManager::load(){
     emit versionChanged();
 }
 
-void SettingsManager::save(){
-    if (m_loading)
-        return;
-
-    const QString path = configFilePath();
-    const QString dir = QFileInfo(path).absolutePath();
-
-    QDir().mkpath(dir);
+void SettingsManager::save()
+{
+    m_saveTimer.stop();
+    if (m_loading) return;
 
     QJsonObject o;
     o["version"] = VERSION;
@@ -293,15 +351,25 @@ void SettingsManager::save(){
     o["gameDir"] = m_gameDir;
     o["jvmArgs"] = m_jvmArgs;
     o["maxRam"] = m_maxRam;
+    o["lastBuild"] = m_lastBuild;
 
-    QFile f(path);
+    QDir().mkpath(QFileInfo(configFilePath()).absolutePath());
 
-    if (!f.open(QIODevice::WriteOnly)){
+    QSaveFile f(configFilePath());
+    if (!f.open(QIODevice::WriteOnly)) {
         qWarning() << "ERROR: Failed to open file to save settings";
         return;
     }
-
     f.write(QJsonDocument(o).toJson());
+    if (!f.commit()) qWarning() << "ERROR: Failed to commit settings file";
+}
+
+void SettingsManager::setLastBuild(const QString &v)
+{
+    if (m_lastBuild == v) return;
+    m_lastBuild = v;
+    emit lastBuildChanged();
+    scheduleSave();
 }
 
 void SettingsManager::setUsername(const QString &v)
@@ -309,7 +377,7 @@ void SettingsManager::setUsername(const QString &v)
     if (m_username == v) return;
     m_username = v;
     emit usernameChanged();
-    save();
+    scheduleSave();
 }
 
 void SettingsManager::setVersion(int v)
@@ -317,7 +385,7 @@ void SettingsManager::setVersion(int v)
     if (m_version == v) return;
     m_version = v;
     emit versionChanged();
-    save();
+    scheduleSave();
 }
 
 void SettingsManager::setRamMb(int v)
@@ -325,7 +393,7 @@ void SettingsManager::setRamMb(int v)
     if (m_ramMb == v) return;
     m_ramMb = v;
     emit ramMbChanged();
-    save();
+    scheduleSave();
 }
 
 void SettingsManager::setMaxRam(int v)
@@ -333,7 +401,8 @@ void SettingsManager::setMaxRam(int v)
     if (m_maxRam == v) return;
     m_maxRam = v;
     emit maxRamChanged();
-    save();
+    if (v >= 2048 && m_ramMb > v) setRamMb(v);
+    scheduleSave();
 }
 
 void SettingsManager::setJavaPath(const QString &v)
@@ -341,7 +410,7 @@ void SettingsManager::setJavaPath(const QString &v)
     if (m_javaPath == v) return;
     m_javaPath = v;
     emit javaPathChanged();
-    save();
+    scheduleSave();
 }
 
 void SettingsManager::setGameDir(const QString &v)
@@ -349,7 +418,7 @@ void SettingsManager::setGameDir(const QString &v)
     if (m_gameDir == v) return;
     m_gameDir = v;
     emit gameDirChanged();
-    save();
+    scheduleSave();
 }
 
 void SettingsManager::setJvmArgs(const QString &v)
@@ -357,5 +426,5 @@ void SettingsManager::setJvmArgs(const QString &v)
     if (m_jvmArgs == v) return;
     m_jvmArgs = v;
     emit jvmArgsChanged();
-    save();
+    scheduleSave();
 }

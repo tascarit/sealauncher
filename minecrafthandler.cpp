@@ -1,2092 +1,1881 @@
 #include "minecrafthandler.h"
 #include "NewDebug.h"
+
+#include <QSaveFile>
+#include <QFileInfo>
+#include <QHash>
+#include <QRegularExpression>
+#include <QStorageInfo>
+#include <QDateTime>
+#include <QSet>
+#include <QSysInfo>
+#include <QUrl>
 #include <algorithm>
-#include <array>
 
-MinecraftHandler::MinecraftHandler(QObject *parent) : QObject(parent), m_manager(new QNetworkAccessManager(this))
+#include <private/qzipreader_p.h>
+
+namespace {
+
+constexpr const char* kManifestUrl  = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+constexpr const char* kBuildsUrl    = "https://raw.githubusercontent.com/tascarit/MinecraftSborki/refs/heads/main/builds.json";
+constexpr const char* kNewsUrl      = "https://raw.githubusercontent.com/tascarit/MinecraftSborki/refs/heads/main/news.json";
+constexpr const char* kAssetsUrl    = "https://resources.download.minecraft.net/";
+constexpr const char* kFabricMaven  = "https://maven.fabricmc.net/";
+
+constexpr qint64 kMinFreeSpaceBytes = 1LL * 1024 * 1024 * 1024;
+
+QString fmtMb(qint64 bytes)   { return QString::number(double(bytes) / 1048576.0, 'f', 1); }
+QString fmtSpeed(double bps)  { return QString::number(bps / 1048576.0, 'f', 1); }
+
+QString fmtEta(qint64 remainingBytes, double bps)
 {
-    m_progressThrottle = new QTimer(this);
-    m_progressThrottle->setInterval(100);
-    connect(m_progressThrottle, &QTimer::timeout, this, [this]() {
-        if (!m_hasPendingUpdate) return;
-        m_hasPendingUpdate = false;
-        emit q->installProgress(m_pendingStage, m_pendingDetails, m_pendingProgress);
-    });
-    m_progressThrottle->start();
+    if (bps < 1024.0 || remainingBytes <= 0) return QString();
+    const qint64 sec = qint64(double(remainingBytes) / bps);
+    if (sec < 5) return QString();
+    if (sec < 60) return QStringLiteral("  •  ещё ~%1 с").arg(sec);
+    if (sec < 3600) return QStringLiteral("  •  ещё ~%1 мин %2 с").arg(sec / 60).arg(sec % 60);
+    return QStringLiteral("  •  ещё ~%1 ч %2 мин").arg(sec / 3600).arg((sec % 3600) / 60);
 }
 
-MinecraftHandler::~MinecraftHandler(){}
+QString normZipPath(QString p)
+{
+    p.replace('\\', '/');
+    while (p.startsWith('/')) p.remove(0, 1);
+    while (p.endsWith('/')) p.chop(1);
+    return p;
+}
 
-void MinecraftHandler::Initialize(QQuickView* v, QmlHandler* _q, SettingsManager* _sm, SettingsController* _sc){
-    view = v; q = _q; sm = _sm; sc = _sc;
-    if (sm) {
-        connect(sm, &SettingsManager::javaPathChanged, this, [this]() {
-            m_javaMajorVersion = -1;
-        });
+bool isSafeBuildName(const QString& n)
+{
+    const QString t = n.trimmed();
+    if (t.isEmpty() || t != n) return false;
+    if (t == QLatin1String(".") || t == QLatin1String("..")) return false;
+    static const QString bad = QStringLiteral("/\\:*?\"<>|");
+    for (const QChar c : t)
+        if (bad.contains(c)) return false;
+    return true;
+}
+
+bool ruleMatchesOs(const QJsonObject& rule)
+{
+    const QJsonObject os = rule.value(QStringLiteral("os")).toObject();
+    if (os.isEmpty()) return true;
+
+    if (os.contains(QStringLiteral("name")) &&
+        os.value(QStringLiteral("name")).toString().toLower() != QLatin1String("windows"))
+        return false;
+
+    if (os.contains(QStringLiteral("arch"))) {
+        const QString cpu = QSysInfo::currentCpuArchitecture();
+        const QString cur = cpu.contains(QLatin1String("arm"), Qt::CaseInsensitive) ? QStringLiteral("arm64")
+                                                                                    : (cpu.contains(QLatin1String("64")) ? QStringLiteral("x86_64") : QStringLiteral("x86"));
+        if (os.value(QStringLiteral("arch")).toString() != cur) return false;
     }
+    return true;
 }
 
-void MinecraftHandler::ensureLauncherProfile(const QString& gameDir)
+bool rulesAllow(const QJsonArray& rules)
 {
-    QDir().mkpath(gameDir);
-    const QString path = gameDir + "/launcher_profiles.json";
-    if (QFileInfo::exists(path)) return;
+    if (rules.isEmpty()) return true;
+    bool allowed = false;
+    for (const QJsonValue& rv : rules) {
+        const QJsonObject rule = rv.toObject();
+        if (ruleMatchesOs(rule))
+            allowed = (rule.value(QStringLiteral("action")).toString() == QLatin1String("allow"));
+    }
+    return allowed;
+}
 
-    QJsonObject root;
-    root["profiles"] = QJsonObject();
-    root["selectedProfile"] = QString();
-    root["clientToken"] = QString("8aa19a0b-733b-4153-8098-6214d930881c");
-    root["authenticationDatabase"] = QJsonObject();
-    root["launcherVersion"] = QJsonObject{{"name", "SeaLauncher"}, {"format", 21}, {"profilesFormat", 21}};
+bool writeFileAtomic(const QString& path, const QByteArray& data)
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QSaveFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return false;
+    if (f.write(data) != data.size()) { f.cancelWriting(); return false; }
+    return f.commit();
+}
 
+QJsonObject readJsonObject(const QString& path)
+{
     QFile f(path);
-    if (!f.open(QIODevice::WriteOnly)) { qWarning() << "[Installer] Не удалось создать launcher_profiles.json в" << path; return; }
-    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-    qDebug() << "[Installer] Создан launcher_profiles.json в" << path;
+    if (!f.open(QIODevice::ReadOnly)) return QJsonObject();
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return QJsonObject();
+    return doc.object();
 }
 
-bool MinecraftHandler::isJvmArgSupported(const QString& arg, int javaMajor)
+QString mavenPathFromName(const QString& name)
 {
-    struct Rule { const char* prefix; int minJava; int maxJava; };
-    static const Rule rules[] = {
-        { "--sun-misc-unsafe-memory-access", 23, -1 },
-        { "--enable-preview", 11, -1 },
-        { "-XX:+UseShenandoahGC", 12, -1 },
-        { "-XX:+UseZGC", 11, -1 },
-        { "-XX:+ZGenerational", 21, -1 },
-        { "-XX:+UseCompactObjectHeaders", 24, -1 },
-        { "-XX:+UseStringDeduplication", 8, -1 },
-        { "--add-opens", 9, -1 }, { "--add-exports", 9, -1 }, { "--add-modules", 9, -1 },
-        { "--module-path", 9, -1 }, { "-p", 9, -1 },
-        };
-    for (const auto& r : rules) {
-        if (arg.startsWith(r.prefix)) {
-            if (javaMajor < r.minJava) return false;
-            if (r.maxJava > 0 && javaMajor > r.maxJava) return false;
-        }
-    }
-    return true;
+    QString n = name;
+    QString ext = QStringLiteral("jar");
+    const int at = n.indexOf('@');
+    if (at >= 0) { ext = n.mid(at + 1); n = n.left(at); }
+    const QStringList parts = n.split(':');
+    if (parts.size() < 3) return QString();
+    QString group = parts[0];
+    group.replace('.', '/');
+    const QString file = parts[1] + QLatin1Char('-') + parts[2]
+                         + (parts.size() >= 4 ? QLatin1Char('-') + parts[3] : QString())
+                         + QLatin1Char('.') + ext;
+    return group + QLatin1Char('/') + parts[1] + QLatin1Char('/') + parts[2] + QLatin1Char('/') + file;
 }
 
-int MinecraftHandler::detectJavaMajorVersion()
+QString versionJsonFile(const QString& gamePath, const QString& versionId)
 {
-    if (m_javaMajorVersion > 0) return m_javaMajorVersion;
-    QProcess p;
-    p.start(sm->javaPath(), {"-version"});
-    if (!p.waitForFinished(3000)) { m_javaMajorVersion = 21; return m_javaMajorVersion; }
-    QString out = QString::fromLocal8Bit(p.readAllStandardError()) + QString::fromLocal8Bit(p.readAllStandardOutput());
-    QRegularExpression re(R"((?:version\s+")?(?:1\.)?(\d+)(?:[\._"])?)");
-    auto m = re.match(out);
-    m_javaMajorVersion = m.hasMatch() ? m.captured(1).toInt() : 21;
-    newDebug() << "[Java] Detected major version:" << m_javaMajorVersion;
-    return m_javaMajorVersion;
+    return gamePath + QStringLiteral("/versions/") + versionId + QLatin1Char('/') + versionId + QStringLiteral(".json");
 }
 
-void MinecraftHandler::reCheckBuilds(const QString& build, const QString& version, const QString& loader, const QString& mcVer, const QString& git, const int parts, const QString& packVer){
-    newDebug() << "Rechecking build folder: " << build << " for: Minecraft v" << mcVer << ", " << loader << ", pack v" << packVer;
-    m_buildName = build; m_buildVersion = version; m_buildLoader = loader;
-    m_mcVersion = mcVer; m_buildArchiveLink = git; m_archiveParts = parts;
-    m_packVersion = packVer;
-
-    QString gamePath = sm->gameDir() + "/" + build;
-    QDir().mkpath(sm->gameDir());
-    m_buildExists = QDir().exists(gamePath);
-
-    if (m_buildExists) {
-        checkInstallation(gamePath);
-        m_installedPackVersion = readInstalledPackVersion(gamePath);
-        setUpdateAvailable(m_installedPackVersion != m_packVersion);
-        newDebug() << "[Check] installed pack:" << m_installedPackVersion
-                   << "server pack:" << m_packVersion
-                   << "update:" << m_updateAvailable;
-    } else {
-        m_installedPackVersion.clear();
-        setUpdateAvailable(false);
-    }
-
-    newDebug() << "Does build exist? " << m_buildExists;
-    emit buildExistsChanged();
 }
 
-QString MinecraftHandler::readInstalledPackVersion(const QString& gamePath) const
-{
-    QFile f(gamePath + "/sealauncher_meta.json");
-    if (!f.open(QIODevice::ReadOnly)) return "0.1";
-
-    QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
-    QString ver = o.value("packVersion").toString();
-
-    return ver.isEmpty() ? "0.1" : ver;
-}
-
-void MinecraftHandler::writeBuildMeta(const QString& gamePath)
-{
-    QDir().mkpath(gamePath);
-    QJsonObject o;
-    o["packVersion"] = m_packVersion;
-    o["loaderVersion"] = m_buildVersion;
-    o["loader"] = m_buildLoader;
-    o["mcVersion"] = m_mcVersion;
-    o["git"] = m_buildArchiveLink;
-    o["parts"] = m_archiveParts;
-    o["installedAt"] = QDateTime::currentSecsSinceEpoch();
-
-    QFile f(gamePath + "/sealauncher_meta.json");
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        newDebug() << "[Meta] Cannot write:" << f.fileName();
-        return;
-    }
-    f.write(QJsonDocument(o).toJson(QJsonDocument::Indented));
-    f.close();
-    newDebug() << "[Meta] Written pack version:" << m_packVersion;
-}
-
-void MinecraftHandler::prepareForUpdate(const QString& gamePath)
-{
-    static const QStringList keep = {
-        "saves",
-        "options.txt",
-        "screenshots",
-        "resourcepacks",
-        "shaderpacks",
-        "sealauncher_meta.json",
-        "assets"
-    };
-
-    QDir dir(gamePath);
-
-    const QFileInfoList entries =
-        dir.entryInfoList(
-            QDir::AllEntries |
-            QDir::NoDotAndDotDot
-            );
-
-    for (const QFileInfo& fileInfo : entries) {
-        if (keep.contains(
-                fileInfo.fileName(),
-                Qt::CaseInsensitive)) {
-            continue;
-        }
-
-        if (fileInfo.isDir()) {
-            QDir target(fileInfo.absoluteFilePath());
-
-            if (!target.removeRecursively()) {
-                newDebug()
-                << "[Update] Failed to remove:"
-                << fileInfo.absoluteFilePath();
-            }
-        } else {
-            if (!QFile::remove(fileInfo.absoluteFilePath())) {
-                newDebug()
-                << "[Update] Failed to remove:"
-                << fileInfo.absoluteFilePath();
-            }
-        }
-    }
-}
-
-bool MinecraftHandler::loaderAlreadyInstalled(const QString& gamePath) const
-{
-    QFile f(gamePath + "/sealauncher_meta.json");
-
-    if (!f.open(QIODevice::ReadOnly))
-        return false;
-
-    QJsonParseError error;
-    const QJsonDocument document =
-        QJsonDocument::fromJson(f.readAll(), &error);
-
-    if (error.error != QJsonParseError::NoError ||
-        !document.isObject()) {
-        return false;
-    }
-
-    const QJsonObject object = document.object();
-
-    if (object.value("loader").toString() != m_buildLoader)
-        return false;
-
-    if (object.value("loaderVersion").toString() != m_buildVersion)
-        return false;
-
-    if (object.value("mcVersion").toString() != m_mcVersion)
-        return false;
-
-    const QString versionId = getVersionId();
-
-    const QString versionDir =
-        gamePath + "/versions/" + versionId;
-
-    const QString versionJson =
-        versionDir + "/" + versionId + ".json";
-
-    return QFileInfo::exists(versionJson);
-}
-
-void MinecraftHandler::mainButtonClick(){
-    newDebug() << "DEBUG: Handling main button click";
-
-    if (m_minecraftProcess && m_minecraftProcess->state() != QProcess::NotRunning) {
-        newDebug() << "[MC] Minecraft already running";
-        return;
-    }
-
-    QString gamePath = sm->gameDir() + "/" + m_buildName;
-    const bool needInstall = !m_buildExists || m_updateAvailable;
-
-    if (m_updateAvailable) {
-        newDebug() << "[Update] Updating" << m_buildName
-                   << "pack from" << m_installedPackVersion << "to" << m_packVersion;
-        prepareForUpdate(gamePath);
-    }
-
-    if (needInstall){
-        newDebug() << "DEBUG: Downloading version for " << m_buildVersion;
-        connect(this, &MinecraftHandler::finished, this, [this, gamePath](){
-            writeBuildMeta(gamePath);
-            sc->closeProgressPanel(view);
-        }, Qt::SingleShotConnection);
-
-        const bool skipLoader = m_updateAvailable
-                                && !m_buildArchiveLink.isEmpty()
-                                && loaderAlreadyInstalled(gamePath);
-
-        if (skipLoader) {
-            newDebug() << "[Update] Loader unchanged, downloading modpack only";
-            finalizeInstall(gamePath);
-        }
-        else if (m_buildLoader == "neoforge") downloadNeoforge(m_buildVersion);
-        else if (m_buildLoader == "vanilla") installVanilla(m_mcVersion);
-        else if (m_buildLoader == "fabric") installFabric(m_mcVersion, m_buildVersion);
-        else if (m_buildLoader == "forge") installForge(m_mcVersion, m_buildVersion);
-
-        if (m_updateAvailable)
-            m_updateAvailable = false;
-
-        emit buildsChanged();
-    } else {
-        QStringList command = parseVersionJson(gamePath);
-        newDebug() << "DEBUG: Starting minecraft on " << m_buildLoader << " " << m_buildVersion;
-        launchMinecraft(command, gamePath);
-    }
-}
-
-void MinecraftHandler::finalizeInstall(const QString& gamePath)
-{
-    if (m_buildArchiveLink.trimmed().isEmpty()) {
-        newDebug() << "[Install] No modpack archive, finalizing local build";
-        setUpdateAvailable(false);
-        setBuildExists(true);
-        emit installFinished();
-        emit finished();
-        return;
-    }
-    installModpack(m_buildArchiveLink, gamePath, m_archiveParts);
-}
-
-void MinecraftHandler::installLocalBuild(const QString& buildName, const QString& mcVersion, const QString& loader, const QString& loaderVersion)
-{
-    m_packVersion = QStringLiteral("0.1");
-    m_buildName = buildName;
-    m_mcVersion = mcVersion;
-    m_buildLoader = loader;
-    m_buildVersion = loaderVersion;
-    m_buildArchiveLink.clear();
-    m_archiveParts = 1;
-
-    QString gamePath = sm->gameDir() + "/" + buildName;
-    QDir().mkpath(gamePath);
-
-    connect(this, &MinecraftHandler::finished, this, [this, gamePath](){
-        writeBuildMeta(gamePath);
-        sc->closeProgressPanel(view);
-    }, Qt::SingleShotConnection);
-
-    if (loader == "vanilla") installVanilla(mcVersion);
-    else if (loader == "fabric") installFabric(mcVersion, loaderVersion);
-    else if (loader == "forge") installForge(mcVersion, loaderVersion);
-    else if (loader == "neoforge") downloadNeoforge(loaderVersion);
-}
-
-void MinecraftHandler::startInstallation(const QString& gamePath){
-    QFile f(gamePath + "/installation");
-
-    if (!f.open(QIODevice::WriteOnly)){
-        newDebug() << "ERROR: Failed to open installation file";
-    }
-
-    setInstallation(true);
-}
-
-void MinecraftHandler::stopInstallation(const QString& gamePath){
-    QFile f(gamePath + "/installation");
-
-    if (!f.open(QIODevice::ReadOnly)){
-        newDebug() << "ERROR: Failed to open installation file";
-    }
-
-    f.remove();
-
-    setInstallation(false);
-}
-
-void MinecraftHandler::checkInstallation(const QString& gamePath)
-{
-    if (QFileInfo::exists(gamePath + "/installation")) {
-        setInstallation(true);
-        return;
-    }
-
-    setInstallation(false);
-}
-
-QString MinecraftHandler::downloadNeoforge(const QString& version)
-{
-    QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/downloads";
-    QDir().mkpath(dir);
-    QString path = dir + QStringLiteral("/neoforge-%1-installer.jar").arg(version);
-    QString url  = QStringLiteral("https://maven.neoforged.net/releases/net/neoforged/neoforge/%1/neoforge-%1-installer.jar").arg(version);
-
-    newDebug() << "[NeoForge] Downloading:" << url;
-    emit q->installProgress(QStringLiteral("Подготовка загрузки"), QStringLiteral("neoforge-%1-installer.jar").arg(version), 0.0);
-
-    QNetworkRequest req{QUrl(url)};
-    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
-
-    QFile *file = new QFile(path);
-    if (!file->open(QIODevice::WriteOnly)) {
-        delete file;
-        emit q->installError(QStringLiteral("Не удалось создать файл"), QStringLiteral("Проверьте права на запись в: ") + dir, path, false);
-        return "";
-    }
-
-    QNetworkReply *reply = m_manager->get(req);
-
-    connect(reply, &QNetworkReply::downloadProgress, this, [this, version](qint64 received, qint64 total) {
-        if (total <= 0) { emit q->installProgress(QStringLiteral("Загрузка установщика NeoForge"), QStringLiteral("neoforge-%1-installer.jar").arg(version), -1.0); return; }
-        double p = double(received) / double(total);
-        QString hr = QString("%1 / %2 МБ").arg(received / 1048576.0, 0, 'f', 1).arg(total / 1048576.0, 0, 'f', 1);
-        emit q->installProgress(QStringLiteral("Загрузка установщика NeoForge"), hr, p);
-    });
-
-    connect(reply, &QNetworkReply::readyRead, this, [file, reply]() { file->write(reply->readAll()); });
-
-    connect(reply, &QNetworkReply::finished, this, [this, reply, file, path]() {
-        file->close();
-        file->deleteLater();
-        if (reply->error() != QNetworkReply::NoError) {
-            qWarning() << "[NeoForge] Error:" << reply->errorString();
-            emit q->installError(QStringLiteral("Ошибка скачивания установщика"), reply->errorString(), path, true);
-            reply->deleteLater();
-            return;
-        }
-        newDebug() << "[NeoForge] Downloaded OK:" << path;
-        emit q->installProgress(QStringLiteral("Установщик загружен"), QStringLiteral("Запуск установки..."), 1.0);
-        emit downloadFinished(path);
-        reply->deleteLater();
-        installNeoforge(path);
-    });
-
-    return path;
-}
-
-QString MinecraftHandler::installNeoforge(const QString& installerPath){
-    QString javaPath = sm->javaPath();
-    if (javaPath.isEmpty()){ emit q->installError("Ошибка", "Путь к Java не найден", "", false); return ""; }
-
-    emit q->installProgress(QStringLiteral("Установка neoforge"), "Начало...", 0.0);
-
-    QString workingDir = sm->gameDir() + "/" + m_buildName;
-    QDir().mkpath(workingDir);
-
-    QProcess *installerProcess = new QProcess(this);
-    installerProcess->setWorkingDirectory(workingDir);
-    installerProcess->setProcessChannelMode(QProcess::MergedChannels);
-    ensureLauncherProfile(workingDir);
-
-    auto* buffer = new QString();
-    auto* processorStep = new int(0);
-
-    connect(installerProcess, &QProcess::readyReadStandardOutput, this, [this, installerProcess, buffer, processorStep](){
-        buffer->append(QString::fromLocal8Bit(installerProcess->readAllStandardOutput()));
-        buffer->replace("\r\n", "\n"); buffer->replace('\r', '\n');
-        if (buffer->size() > 100000) *buffer = buffer->right(2000);
-
-        int nl;
-        while ((nl = buffer->indexOf('\n')) >= 0) {
-            QString line = buffer->left(nl).trimmed();
-            buffer->remove(0, nl + 1);
-            if (line.isEmpty()) continue;
-            newDebug() << "+[NeoforgeInstaller] " << line;
-
-            double p = -1;
-            QString stage = line;
-            if (line.contains("Extracting json", Qt::CaseInsensitive)) { stage = "Чтение профиля установки"; p = 0.05; }
-            else if (line.contains("Considering minecraft", Qt::CaseInsensitive)) { stage = "Проверка Minecraft"; p = 0.10; }
-            else if (line.contains("Downloading libraries", Qt::CaseInsensitive)) { stage = "Скачивание библиотек"; p = 0.25; }
-            else if (line.contains("Downloading asset", Qt::CaseInsensitive)) { stage = "Скачивание ресурсов"; p = 0.40; }
-            else if (line.contains("Running processor", Qt::CaseInsensitive)) {
-                (*processorStep)++;
-                p = 0.45 + qMin(1.0, *processorStep / 8.0) * 0.45;
-                stage = QString("Ремаппинг (%1/8)").arg(*processorStep);
-            }
-            else if (line.contains("Building processor classpath", Qt::CaseInsensitive)) { stage = "Финальная сборка"; p = 0.92; }
-            else if (line.contains("Installation complete", Qt::CaseInsensitive) || line.contains("You can now", Qt::CaseInsensitive)) { stage = "Готово"; p = 1.0; }
-
-            m_pendingStage = "Установка NeoForge"; m_pendingDetails = stage; m_pendingProgress = p;
-            m_hasPendingUpdate = true;
-            if (!m_progressThrottle->isActive()) m_progressThrottle->start();
-        }
-    });
-
-    connect(installerProcess, &QProcess::readyReadStandardError, this, [installerProcess](){
-        QString error = QString::fromLocal8Bit(installerProcess->readAllStandardError());
-        newDebug() << "-[NeoforgeInstaller] ERROR: " << error;
-    });
-
-    connect(installerProcess, &QProcess::finished, this, [this, installerProcess, workingDir, buffer, processorStep](int exitCode, QProcess::ExitStatus exitStatus){
-        delete buffer; delete processorStep;
-        installerProcess->deleteLater();
-        if (exitStatus == QProcess::NormalExit && exitCode == 0){
-            newDebug() << "[NeoforgeInstaller] Neoforge successfully installed!";
-            downloadAssets(workingDir, m_mcVersion);
-            downloadVanillaLibraries(workingDir);
-
-            finalizeInstall(workingDir);
-
-        } else {
-            newDebug() << "Ошибка установки neoforge: " << exitCode;
-            emit q->installError("Ошибка", QString("Ошибка установки neoforge. Код выхода: %1").arg(exitCode), "", true);
-        }
-    });
-
-    installerProcess->start(javaPath, QStringList() << "-jar" << installerPath << "--installClient" << workingDir);
-
-    if (!installerProcess->waitForStarted(10000)){
-        delete buffer; delete processorStep;
-        installerProcess->deleteLater();
-        emit q->installError("Ошибка запуска", "Не удалось запустить процесс установки.", "", false);
-    }
-    return workingDir;
-}
-
-QStringList MinecraftHandler::parseVersionJson(const QString& gamePath)
-{
-    const QString versionId = getVersionId();
-    const QString jsonPath  = gamePath + "/versions/" + versionId + "/" + versionId + ".json";
-
-    QFile f(jsonPath);
-    if (!f.open(QIODevice::ReadOnly)) {
-        newDebug() << "[MC] ERROR: cannot open " << jsonPath;
-        emit q->installError("Ошибка", "Не найден JSON версии", jsonPath, false);
-        return {};
-    }
-    QJsonObject json = QJsonDocument::fromJson(f.readAll()).object();
-    f.close();
-
-    QSet<QString> classpathSet;
-    const QString librariesDir = gamePath + "/libraries";
-
-    auto processLibraries = [&](const QJsonObject& j) {
-        for (const QJsonValue& v : j["libraries"].toArray()) {
-            QJsonObject lib = v.toObject();
-            if (lib.contains("rules")) {
-                bool allowed = false;
-                for (const QJsonValue& rv : lib["rules"].toArray()) {
-                    QJsonObject rule = rv.toObject();
-                    QString action = rule["action"].toString();
-                    bool matches = true;
-                    if (rule.contains("os")) {
-                        QJsonObject os = rule["os"].toObject();
-                        if (os.contains("name") && os["name"].toString() != "windows") matches = false;
-                        if (os.contains("arch")) {
-                            const QString arch = os["arch"].toString();
-                            const bool is64 = QSysInfo::currentCpuArchitecture().contains("64");
-                            if ((arch == "x86" && is64) || (arch == "x86_64" && !is64)) matches = false;
-                        }
-                    }
-                    if (matches) allowed = (action == "allow");
-                }
-                if (!allowed) continue;
-            }
-
-            QString pathStr;
-            if (lib.contains("downloads") && lib["downloads"].toObject().contains("artifact"))
-                pathStr = lib["downloads"].toObject()["artifact"].toObject()["path"].toString();
-            else if (lib.contains("name")) {
-                QStringList parts = lib["name"].toString().split(':');
-                if (parts.size() >= 3) {
-                    QString groupPath = parts[0]; groupPath.replace('.', '/');
-                    QString fileName = parts[1] + "-" + parts[2] + (parts.size() >= 4 ? "-" + parts[3] : "") + ".jar";
-                    pathStr = groupPath + "/" + parts[1] + "/" + parts[2] + "/" + fileName;
-                }
-            }
-            if (pathStr.isEmpty()) continue;
-            classpathSet.insert(QDir::toNativeSeparators(QDir::cleanPath(QDir(librariesDir).absoluteFilePath(pathStr))));
-        }
-    };
-
-    QStringList jsonPaths; jsonPaths << jsonPath;
-    int requiredJava = json["javaVersion"].toObject()["majorVersion"].toInt(0);
-
-    QJsonObject tempJson = json;
-    while (tempJson.contains("inheritsFrom")) {
-        QString parentVersion = tempJson["inheritsFrom"].toString();
-        QString parentPath = gamePath + "/versions/" + parentVersion + "/" + parentVersion + ".json";
-        jsonPaths.prepend(parentPath);
-        QFile pf(parentPath);
-        if (pf.open(QIODevice::ReadOnly)) {
-            tempJson = QJsonDocument::fromJson(pf.readAll()).object();
-            int v = tempJson["javaVersion"].toObject()["majorVersion"].toInt(0);
-            if (v > requiredJava) requiredJava = v;
-            pf.close();
-        } else { newDebug() << "[MC] ERROR: cannot open parent json" << parentPath; break; }
-    }
-
-    int installedJava = detectJavaMajorVersion();
-
-    if (requiredJava > 0) {
-        QString suited = sm->findJavaByMajor(requiredJava);
-        if (suited.isEmpty()) {
-            emit q->installError("Несовместимая версия Java",
-                                 QString("Для Minecraft %1 требуется Java %2, но в системе её нет.\n"
-                                         "Установите JDK %2 и повторите.")
-                                     .arg(m_mcVersion).arg(requiredJava), "", false);
-            return {};
-        }
-
-        m_launchJavaPath = suited;
-        const int suitedMajor = sm->getJavaMajorVersion(suited);
-        newDebug() << "[MC] Required Java:" << requiredJava
-                   << "using Java" << suitedMajor << "at" << suited;
-
-        if (suitedMajor != installedJava)
-            newDebug() << "[MC] NOTE: sm->javaPath() is Java" << installedJava
-                       << "but this version will use Java" << suitedMajor;
-    } else {
-        m_launchJavaPath = sm->javaPath();
-    }
-
-    for (const QString& jPath : jsonPaths) {
-        QFile jf(jPath);
-        if (jf.open(QIODevice::ReadOnly)) {
-            processLibraries(QJsonDocument::fromJson(jf.readAll()).object());
-            jf.close();
-        }
-    }
-
-    if (m_buildLoader == "vanilla" || m_buildLoader == "fabric") {
-        QString baseVersion = json.contains("inheritsFrom") ? json["inheritsFrom"].toString() : m_mcVersion;
-        QString mcJar = gamePath + "/versions/" + baseVersion + "/" + baseVersion + ".jar";
-        if (QFile::exists(mcJar)) classpathSet.insert(QDir::toNativeSeparators(QDir::cleanPath(mcJar)));
-        else newDebug() << "[MC] WARNING: vanilla jar missing:" << mcJar;
-    }
-
-    QStringList classpathList = classpathSet.values();
-    QString classPath = classpathList.join(';');
-    const bool usesBSL = (m_buildLoader == "forge" || m_buildLoader == "neoforge");
-
-    if (usesBSL) {
-        QFile cpFile(gamePath + "/legacyClassPath.txt");
-        if (cpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            for (const QString& entry : classpathList) { cpFile.write(entry.toUtf8()); cpFile.write("\n"); }
-            cpFile.close();
-        }
-    }
-
-    const QString versionName = versionId;
-    QHash<QString, QString> vars;
-    vars["${auth_player_name}"] = sm->username();
-    vars["${auth_uuid}"] = "00000000-0000-0000-0000-000000000000";
-    vars["${auth_access_token}"] = "0"; vars["${auth_session}"] = "0";
-    vars["${user_type}"] = "legacy"; vars["${version_name}"] = versionName;
-    vars["${version_type}"] = "release"; vars["${game_directory}"] = gamePath;
-    vars["${assets_root}"] = gamePath + "/assets"; vars["${assets_index_name}"] = m_mcVersion;
-    vars["${natives_directory}"] = gamePath + "/natives"; vars["${library_directory}"] = librariesDir;
-    vars["${classpath}"] = classPath; vars["${launcher_name}"] = "SeaLauncher";
-    vars["${launcher_version}"] = "1.0"; vars["${resolution_width}"] = "925";
-    vars["${resolution_height}"] = "530"; vars["${game_assets}"] = gamePath + "/assets";
-    vars["${user_properties}"] = "{}"; vars["${clientid}"] = "0"; vars["${auth_xuid}"] = "0";
-    vars["${classpath_separator}"] = ";"; vars["${path_separator}"] = ";";
-    if (usesBSL) { vars["${fml.neoForgeVersion}"] = m_buildVersion; vars["${fml.mcVersion}"] = m_mcVersion; vars["${fml.fmlVersion}"] = ""; }
-    if (m_buildLoader == "fabric") vars["${fabric.gameJarPath}"] = gamePath + "/versions/" + m_mcVersion + "/" + m_mcVersion + ".jar";
-
-    auto substitute = [&vars](QString s) -> QString {
-        for (auto it = vars.constBegin(); it != vars.constEnd(); ++it) s.replace(it.key(), it.value());
-        return s;
-    };
-    auto ruleMatches = [](const QJsonObject& rule) -> bool {
-        QJsonObject os = rule.value("os").toObject();
-        bool matches = true;
-        if (os.contains("name") && os["name"].toString().toLower() != "windows") matches = false;
-        if (os.contains("arch")) {
-            const QString arch = os["arch"].toString();
-            const bool is64 = QSysInfo::currentCpuArchitecture().contains("64");
-            if ((arch == "x86" && is64) || (arch == "x86_64" && !is64)) matches = false;
-        }
-        return matches;
-    };
-    auto expandArray = [&substitute, &ruleMatches](const QJsonArray& arr) -> QStringList {
-        QStringList out;
-        for (const QJsonValue& v : arr) {
-            if (v.isString()) out << substitute(v.toString());
-            else if (v.isObject()) {
-                QJsonObject obj = v.toObject();
-                bool allowed = true;
-                if (obj.contains("rules")) {
-                    allowed = false;
-                    for (const QJsonValue& rv : obj["rules"].toArray()) {
-                        QJsonObject rule = rv.toObject();
-                        if (ruleMatches(rule)) allowed = (rule.value("action").toString() == "allow");
-                    }
-                }
-                if (allowed && obj.contains("value")) {
-                    if (obj["value"].isString()) out << substitute(obj["value"].toString());
-                    else if (obj["value"].isArray())
-                        for (const QJsonValue& sub : obj["value"].toArray())
-                            if (sub.isString()) out << substitute(sub.toString());
-                }
-            }
-        }
-        return out;
-    };
-
-    QStringList jvmArgs;
-    jvmArgs << "-Xmx" + QString::number(sm->ramMb()) + "M";
-    jvmArgs << "-Djava.library.path=" + gamePath + "/natives";
-    if (usesBSL) jvmArgs << "-DlegacyClassPath=" + classPath;
-    else jvmArgs << "-cp" << classPath;
-    if (!sm->jvmArgs().trimmed().isEmpty()) jvmArgs << sm->jvmArgs().split(' ', Qt::SkipEmptyParts);
-
-    const int javaMajor = detectJavaMajorVersion();
-    for (const QString& jPath : jsonPaths) {
-        QFile jf(jPath);
-        if (jf.open(QIODevice::ReadOnly)) {
-            QJsonObject jObj = QJsonDocument::fromJson(jf.readAll()).object();
-            QJsonObject args = jObj["arguments"].toObject();
-            if (args.contains("jvm"))
-                for (const QString& arg : expandArray(args["jvm"].toArray())) {
-                    if (!isJvmArgSupported(arg, javaMajor)) { newDebug() << "[MC] Skipping JVM arg (Java" << javaMajor << "):" << arg; continue; }
-                    jvmArgs << arg;
-                }
-            jf.close();
-        }
-    }
-
-    QStringList gameArgs;
-    bool foundGameArgs = false;
-    for (const QString& jPath : jsonPaths) {
-        QFile jf(jPath);
-        if (!jf.open(QIODevice::ReadOnly)) continue;
-        QJsonObject jObj = QJsonDocument::fromJson(jf.readAll()).object();
-        jf.close();
-        if (jObj.contains("minecraftArguments")) {
-            gameArgs << substitute(jObj["minecraftArguments"].toString()).split(' ', Qt::SkipEmptyParts);
-            foundGameArgs = true; continue;
-        }
-        QJsonObject args = jObj["arguments"].toObject();
-        if (args.contains("game")) { gameArgs << expandArray(args["game"].toArray()); foundGameArgs = true; }
-    }
-    if (!foundGameArgs) {
-        gameArgs << "--username" << sm->username() << "--version" << versionName
-                 << "--gameDir" << gamePath << "--assetsDir" << gamePath + "/assets"
-                 << "--assetIndex" << m_mcVersion << "--uuid" << "00000000-0000-0000-0000-000000000000"
-                 << "--accessToken" << "0" << "--userType" << "legacy";
-    }
-    QStringList filteredGameArgs;
-    for (const QString& arg : gameArgs) if (!arg.startsWith("--quickPlay")) filteredGameArgs << arg;
-    gameArgs = filteredGameArgs;
-    gameArgs.removeAll("--demo");
-
-    QString defaultMain = "net.minecraft.client.main.Main";
-    if (m_buildLoader == "neoforge" || m_buildLoader == "forge") defaultMain = "cpw.mods.bootstraplauncher.BootstrapLauncher";
-    else if (m_buildLoader == "fabric") defaultMain = "net.fabricmc.loader.impl.launch.knot.KnotClient";
-    QString mainClass = json["mainClass"].toString(defaultMain);
-
-    QStringList fullCommand;
-    fullCommand << jvmArgs << mainClass << gameArgs;
-
-    newDebug() << "[MC] loader:" << m_buildLoader << "versionId:" << versionId
-               << "classpath:" << classpathList.size() << "mainClass:" << mainClass;
-
-    return fullCommand;
-}
-
-void MinecraftHandler::downloadLibrariesFromJson(const QJsonObject& json, const QString& gamePath)
-{
-    const QString librariesDir = gamePath + "/libraries";
-    QList<QPair<QString, QString>> queue;
-    int skipped = 0;
-
-    for (const QJsonValue& v : json["libraries"].toArray()) {
-        QJsonObject lib = v.toObject();
-        if (lib.contains("rules")) {
-            bool allowed = false;
-            for (const QJsonValue& rv : lib["rules"].toArray()) {
-                QJsonObject rule = rv.toObject();
-                QString action = rule["action"].toString();
-                bool matches = true;
-                if (rule.contains("os")) {
-                    QJsonObject os = rule["os"].toObject();
-                    if (os.contains("name") && os["name"].toString() != "windows") matches = false;
-                    if (os.contains("arch")) {
-                        const QString arch = os["arch"].toString();
-                        const bool is64 = QSysInfo::currentCpuArchitecture().contains("64");
-                        if ((arch == "x86" && is64) || (arch == "x86_64" && !is64)) matches = false;
-                    }
-                }
-                if (matches) allowed = (action == "allow");
-            }
-            if (!allowed) continue;
-        }
-        QString pathStr, urlStr;
-        if (lib.contains("downloads") && lib["downloads"].toObject().contains("artifact")) {
-            QJsonObject art = lib["downloads"].toObject()["artifact"].toObject();
-            pathStr = art["path"].toString(); urlStr = art["url"].toString();
-        } else if (lib.contains("name")) {
-            QStringList parts = lib["name"].toString().split(':');
-            if (parts.size() >= 3) {
-                QString groupPath = parts[0]; groupPath.replace('.', '/');
-                QString fileName = parts[1] + "-" + parts[2] + (parts.size() >= 4 ? "-" + parts[3] : "") + ".jar";
-                pathStr = groupPath + "/" + parts[1] + "/" + parts[2] + "/" + fileName;
-                QString base = lib["url"].toString();
-                if (base.isEmpty()) base = "https://maven.fabricmc.net/";
-                if (!base.endsWith('/')) base += '/';
-                urlStr = base + pathStr;
-            }
-        }
-        if (pathStr.isEmpty() || urlStr.isEmpty()) continue;
-        QString fullPath = QDir(librariesDir).absoluteFilePath(pathStr);
-        if (QFile::exists(fullPath)) { skipped++; continue; }
-        queue << qMakePair(urlStr, fullPath);
-    }
-
-    if (queue.isEmpty()) { newDebug() << "[Libs] All present (" << skipped << " skipped)"; return; }
-    newDebug() << "[Libs] Downloading" << queue.size() << "libraries";
-
-    std::array<QNetworkAccessManager, 4> managers;
-    QEventLoop loop;
-    constexpr int PARALLEL = 24;
-
-    struct State { int total = 0; int index = 0; int active = 0; int done = 0; int failed = 0; int nextMgr = 0; };
-    auto state = std::make_shared<State>();
-    state->total = queue.size();
-
-    auto pump = std::make_shared<std::function<void()>>();
-    *pump = [this, &loop, &managers, &queue, state, pump]() {
-        while (state->active < PARALLEL && state->index < state->total) {
-            const auto item = queue[state->index++];
-            state->active++;
-            QDir().mkpath(QFileInfo(item.second).absolutePath());
-
-            QNetworkRequest req{QUrl(item.first)};
-            req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-            QNetworkReply* reply = managers[state->nextMgr++ % 4].get(req);
-            QFile* file = new QFile(item.second);
-            if (!file->open(QIODevice::WriteOnly)) {
-                delete file; reply->deleteLater();
-                state->active--; state->done++; state->failed++;
-                if (state->done >= state->total) loop.quit(); else (*pump)();
-                continue;
-            }
-
-            auto* timeout = new QTimer(reply);
-            timeout->setSingleShot(true);
-            timeout->setInterval(30000);
-            QObject::connect(timeout, &QTimer::timeout, reply, [reply]() { reply->abort(); });
-            timeout->start();
-
-            QObject::connect(reply, &QNetworkReply::readyRead, this, [reply, file, timeout]() {
-                timeout->start();
-                file->write(reply->readAll());
-            });
-            QObject::connect(reply, &QNetworkReply::finished, this, [this, &loop, state, pump, reply, file]() {
-                const int err = reply->error();
-                file->close(); file->deleteLater(); reply->deleteLater();
-                if (err != QNetworkReply::NoError) {
-                    state->failed++;
-                    QFile::remove(file->fileName());
-                }
-                state->active--; state->done++;
-                if (state->done % 5 == 0 || state->done == state->total)
-                    emit q->installProgress("Скачивание библиотек", QString("%1 / %2").arg(state->done).arg(state->total), double(state->done) / state->total);
-                if (state->done >= state->total) { loop.quit(); return; }
-                (*pump)();
-            });
-        }
-    };
-
-    (*pump)();
-    loop.exec();
-    newDebug() << "[Libs] Done. Failed:" << state->failed;
-}
-
-void MinecraftHandler::downloadVanillaLibraries(const QString& gamePath)
-{
-    const QString jsonPath = gamePath + "/versions/" + m_mcVersion + "/" + m_mcVersion + ".json";
-    QFile f(jsonPath);
-    if (!f.open(QIODevice::ReadOnly)) { newDebug() << "[Vanilla] Cannot open" << jsonPath; return; }
-    QJsonObject json = QJsonDocument::fromJson(f.readAll()).object();
-    f.close();
-
-    const QString librariesDir = gamePath + "/libraries";
-    QList<QPair<QString, QString>> queue;
-
-    for (const QJsonValue& v : json["libraries"].toArray()) {
-        QJsonObject lib = v.toObject();
-        if (!lib.contains("downloads")) continue;
-        QJsonObject downloads = lib["downloads"].toObject();
-        if (!downloads.contains("artifact")) continue;
-        QJsonObject artifact = downloads["artifact"].toObject();
-        QString url = artifact["url"].toString(), path = artifact["path"].toString();
-        if (url.isEmpty() || path.isEmpty()) continue;
-        QString fullPath = QDir(librariesDir).absoluteFilePath(path);
-        if (QFile::exists(fullPath)) continue;
-        queue << qMakePair(url, fullPath);
-    }
-
-    if (queue.isEmpty()) { newDebug() << "[Vanilla] All present"; return; }
-    newDebug() << "[Vanilla] Downloading" << queue.size() << "libraries";
-
-    std::array<QNetworkAccessManager, 4> managers;
-    QEventLoop loop;
-    constexpr int PARALLEL = 24;
-
-    struct State { int total = 0; int index = 0; int active = 0; int done = 0; int failed = 0; int nextMgr = 0; };
-    auto state = std::make_shared<State>();
-    state->total = queue.size();
-
-    auto pump = std::make_shared<std::function<void()>>();
-    *pump = [this, &loop, &managers, &queue, state, pump]() {
-        while (state->active < PARALLEL && state->index < state->total) {
-            const auto item = queue[state->index++];
-            state->active++;
-            QDir().mkpath(QFileInfo(item.second).absolutePath());
-
-            QNetworkRequest req{QUrl(item.first)};
-            req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-            QNetworkReply* reply = managers[state->nextMgr++ % 4].get(req);
-            QFile* file = new QFile(item.second);
-            if (!file->open(QIODevice::WriteOnly)) {
-                delete file; reply->deleteLater();
-                state->active--; state->done++; state->failed++;
-                if (state->done >= state->total) loop.quit(); else (*pump)();
-                continue;
-            }
-            auto* timeout = new QTimer(reply);
-            timeout->setSingleShot(true);
-            timeout->setInterval(30000);
-            QObject::connect(timeout, &QTimer::timeout, reply, [reply]() { reply->abort(); });
-            timeout->start();
-
-            QObject::connect(reply, &QNetworkReply::readyRead, this, [reply, file, timeout]() {
-                timeout->start();
-                file->write(reply->readAll());
-            });
-            QObject::connect(reply, &QNetworkReply::finished, this, [this, &loop, state, pump, reply, file]() {
-                const int err = reply->error();
-                file->close(); file->deleteLater(); reply->deleteLater();
-                if (err != QNetworkReply::NoError) { state->failed++; QFile::remove(file->fileName()); }
-                state->active--; state->done++;
-                if (state->done % 5 == 0 || state->done == state->total)
-                    emit q->installProgress("Скачивание библиотек Minecraft", QString("%1 / %2").arg(state->done).arg(state->total), double(state->done) / state->total);
-                if (state->done >= state->total) { loop.quit(); return; }
-                (*pump)();
-            });
-        }
-    };
-
-    (*pump)();
-    loop.exec();
-    newDebug() << "[Vanilla] Done. Failed:" << state->failed;
-}
-
-QString MinecraftHandler::fetchUrl(const QString& url, int timeoutMs, int retries)
-{
-    for (int attempt = 0; attempt <= retries; ++attempt) {
-        newDebug() << "[Fetch] attempt" << attempt << "url:" << url;
-
-        QNetworkRequest req{QUrl(url)};
-        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::RedirectPolicy::NoLessSafeRedirectPolicy);
-        QNetworkReply* reply = m_manager->get(req);
-
-        QEventLoop loop;
-        QTimer timer;
-        timer.setSingleShot(true);
-        timer.setInterval(timeoutMs);
-        QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
-        QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-        timer.start();
-        loop.exec();
-
-        const bool timedOut = !timer.isActive();
-        if (timedOut) {
-            newDebug() << "[Fetch] TIMEOUT url:" << url;
-            reply->abort();
-            reply->deleteLater();
-            continue;
-        }
-        timer.stop();
-
-        if (reply->error() == QNetworkReply::NoError) {
-            const QByteArray data = reply->readAll();
-            reply->deleteLater();
-            newDebug() << "[Fetch] OK bytes:" << data.size() << "url:" << url;
-            return QString::fromUtf8(data);
-        }
-
-        newDebug() << "[Fetch] err:" << reply->errorString() << "url:" << url;
-        reply->deleteLater();
-    }
-    return QString();
-}
-
-void MinecraftHandler::downloadAssets(const QString& gamePath, const QString& assetIndexId)
-{
-    const QString indexesDir = gamePath + "/assets/indexes";
-    const QString objectsDir = gamePath + "/assets/objects";
-    QDir().mkpath(indexesDir); QDir().mkpath(objectsDir);
-
-    const QString versionJson = gamePath + "/versions/" + m_mcVersion + "/" + m_mcVersion + ".json";
-    QFile vf(versionJson);
-    if (!vf.open(QIODevice::ReadOnly)) { newDebug() << "[Assets] Cannot open" << versionJson; return; }
-    QJsonObject vJson = QJsonDocument::fromJson(vf.readAll()).object();
-    vf.close();
-
-    QJsonObject assetIndex = vJson["assetIndex"].toObject();
-    const QString idxUrl = assetIndex["url"].toString();
-    const QString idxPath = indexesDir + "/" + assetIndexId + ".json";
-
-    if (!QFile::exists(idxPath) || QFileInfo(idxPath).size() == 0) {
-        newDebug() << "[Assets] Fetching index:" << idxUrl;
-        QString idxData = fetchUrl(idxUrl, 30000, 3);
-        if (idxData.isEmpty()) {
-            newDebug() << "[Assets] Index fetch failed";
-            emit q->installError("Ошибка установки ассетов",
-                                 "Не удалось скачать индекс ассетов",
-                                 "", true);
-            return;
-        }
-        QFile f(idxPath);
-        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) { newDebug() << "[Assets] Cannot write index" << idxPath; return; }
-        f.write(idxData.toUtf8());
-        f.close();
-    }
-
-    QFile inf(idxPath);
-    if (!inf.open(QIODevice::ReadOnly)) { newDebug() << "[Assets] Cannot read index" << idxPath; return; }
-    QJsonObject index = QJsonDocument::fromJson(inf.readAll()).object();
-    inf.close();
-
-    struct Asset { QString url; QString path; qint64 size = 0; };
-    QList<Asset> queue;
-    QJsonObject objects = index["objects"].toObject();
-    for (auto it = objects.constBegin(); it != objects.constEnd(); ++it) {
-        const QJsonObject obj = it.value().toObject();
-        const QString hash = obj["hash"].toString();
-        const QString sub = hash.left(2);
-        const QString path = objectsDir + "/" + sub + "/" + hash;
-        if (QFile::exists(path) && QFileInfo(path).size() > 0) continue;
-        Asset a;
-        a.url = "https://resources.download.minecraft.net/" + sub + "/" + hash;
-        a.path = path;
-        a.size = (qint64)obj["size"].toDouble();
-        queue << a;
-    }
-
-    const int total = queue.size();
-    if (total == 0) { newDebug() << "[Assets] All present"; return; }
-
-    std::array<QNetworkAccessManager, 4> managers;
-    QEventLoop loop;
-    constexpr int PARALLEL = 24;
-    constexpr int NO_DATA_TIMEOUT_MS = 30000;
-
-    struct State {
-        int total = 0;
-        qint64 totalBytes = 0;
-        qint64 doneBytes = 0;
-        int index = 0;
-        int active = 0;
-        int done = 0;
-        int failed = 0;
-        int nextMgr = 0;
-    };
-    auto state = std::make_shared<State>();
-    state->total = total;
-    for (const Asset& a : queue) state->totalBytes += a.size;
-    newDebug() << "[Assets] Downloading" << state->total << "files," << state->totalBytes << "bytes";
-
-    auto pump = std::make_shared<std::function<void()>>();
-    *pump = [this, &loop, &managers, &queue, state, pump]() {
-        while (state->active < PARALLEL && state->index < state->total) {
-            const Asset a = queue[state->index++];
-            state->active++;
-            QDir().mkpath(QFileInfo(a.path).absolutePath());
-
-            QNetworkRequest req{QUrl(a.url)};
-            req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-            QNetworkReply* reply = managers[state->nextMgr++ % 4].get(req);
-            QFile* file = new QFile(a.path);
-            file->open(QIODevice::WriteOnly);
-
-            auto* timeout = new QTimer(reply);
-            timeout->setSingleShot(true);
-            timeout->setInterval(NO_DATA_TIMEOUT_MS);
-            QObject::connect(timeout, &QTimer::timeout, reply, [reply]() { reply->abort(); });
-            timeout->start();
-
-            QObject::connect(reply, &QNetworkReply::readyRead, this, [reply, file, timeout]() {
-                timeout->start();
-                file->write(reply->readAll());
-            });
-            QObject::connect(reply, &QNetworkReply::finished, this, [this, &loop, state, pump, reply, file, a]() {
-                const int err = reply->error();
-                file->close(); file->deleteLater(); reply->deleteLater();
-                if (err != QNetworkReply::NoError) {
-                    state->failed++;
-                    QFile::remove(file->fileName());
-                    newDebug() << "[Assets] file failed:" << a.path << "err:" << err;
-                } else {
-                    state->doneBytes += a.size;
-                }
-                state->active--; state->done++;
-                if (state->done == 1 || state->done % 20 == 0 || state->done == state->total)
-                    emit q->installProgress("Загрузка ассетов",
-                                            QString("%1 / %2 МБ").arg(state->doneBytes / 1048576.0, 0, 'f', 1).arg(state->totalBytes / 1048576.0, 0, 'f', 1),
-                                            state->totalBytes > 0 ? double(state->doneBytes) / double(state->totalBytes) : 0.0);
-                if (state->done >= state->total) { loop.quit(); return; }
-                (*pump)();
-            });
-        }
-    };
-
-    (*pump)();
-    loop.exec();
-    newDebug() << "[Assets] Done. Failed:" << state->failed;
-    if (state->failed > 0) emit q->installError("Ошибка загрузки ассетов", QString("Не удалось скачать %1 файлов").arg(state->failed), "", true);
-}
-
-void MinecraftHandler::deleteCurrentBuild()
-{
-    if (!q || !sm) return;
-    QString path = sm->gameDir() + "/" + m_buildName;
-    QDir dir(path);
-    if (!dir.exists()) return;
-    if (dir.removeRecursively()) {
-        newDebug() << "[Delete] Removed:" << path;
-        setBuildExists(false);
-        setUpdateAvailable(false);
-    } else {
-        emit q->installError("Ошибка", "Не удалось удалить сборку", path, false);
-    }
-}
-
-void MinecraftHandler::openLauncherDir()
-{
-    QString path = sm->gameDir();
-    QDir().mkpath(path);
-    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
-}
-
-void MinecraftHandler::fetchBuildsList()
-{
-    QString url = "https://raw.githubusercontent.com/tascarit/MinecraftSborki/refs/heads/main/builds.json";
-    if (url.isEmpty()) {
-        newDebug() << "[FetchBuilds] URL is empty";
-        return;
-    }
-    newDebug() << "[FetchBuilds] Fetching from:" << url;
-    QString data = fetchUrl(url, 10000, 3);
-    if (data.isEmpty()) {
-        emit q->installError("Ошибка", "Не удалось получить список сборок", url, true);
-        return;
-    }
-    newDebug() << "[FetchBuilds] data: " << data.toStdString().c_str();
-    QJsonDocument doc = QJsonDocument::fromJson(data.toUtf8());
-    if (!doc.isArray()) {
-        emit q->installError("Ошибка", "Некорректный формат списка сборок", url, false);
-        return;
-    }
-    emit buildsListReady(doc.array());
-}
-
-void MinecraftHandler::fetchNews()
-{
-    QString url = "https://raw.githubusercontent.com/tascarit/MinecraftSborki/refs/heads/main/news.json";
-    if (url.isEmpty()) {
-        newDebug() << "[FetchNews] URL is empty";
-        return;
-    }
-    newDebug() << "[FetchNews] Fetching from:" << url;
-    QString data = fetchUrl(url, 10000, 3);
-    if (data.isEmpty()) {
-        newDebug() << "[FetchNews] Empty response";
-        return;
-    }
-    QJsonDocument doc = QJsonDocument::fromJson(data.toUtf8());
-    if (!doc.isArray()) {
-        newDebug() << "[FetchNews] Not an array";
-        return;
-    }
-    QJsonArray arr = doc.array();
-    if (arr.size() > 8) {
-        QJsonArray limited;
-        for (int i = 0; i < 8; ++i) limited.append(arr.at(i));
-        emit newsReady(limited);
-    } else {
-        emit newsReady(arr);
-    }
-}
-
-void MinecraftHandler::downloadFileParallel(const QString& url, const QString& savePath, int chunkSizeMB, int maxParallel)
-{
-    QNetworkAccessManager* mgr = new QNetworkAccessManager(this);
-    QNetworkRequest probeReq{QUrl(url)};
-    probeReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    probeReq.setRawHeader("Range", "bytes=0-0");
-    QNetworkReply* probeReply = mgr->get(probeReq);
-
-    connect(probeReply, &QNetworkReply::finished, this, [=, this]() {
-        const int probeErr = probeReply->error();
-        const QString probeErrStr = probeReply->errorString();
-        const int httpStatus = probeReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const QByteArray rangeHeader = probeReply->rawHeader("Content-Range");
-        probeReply->deleteLater();
-
-        newDebug() << "[DL] probe http:" << httpStatus << "err:" << probeErr << probeErrStr;
-        newDebug() << "[DL] Content-Range:" << rangeHeader;
-
-        if (probeErr != QNetworkReply::NoError) {
-            emit q->installError("Ошибка", "Не удалось получить файл: " + probeErrStr, url, false);
-            mgr->deleteLater(); emit downloadFailed(savePath, probeErrStr); return;
-        }
-        if (rangeHeader.isEmpty()) { newDebug() << "[DL] No Range support, single-stream"; downloadSingleStream(url, savePath, mgr); return; }
-
-        int slashPos = rangeHeader.indexOf('/');
-        if (slashPos < 0) { emit q->installError("Ошибка", "Некорректный Content-Range", url, false); mgr->deleteLater(); emit downloadFailed(savePath, "bad Content-Range"); return; }
-
-        qint64 fileSize = rangeHeader.mid(slashPos + 1).toLongLong();
-        if (fileSize <= 0) { emit q->installError("Ошибка", "Размер файла 0", url, false); mgr->deleteLater(); emit downloadFailed(savePath, "zero file size"); return; }
-
-        newDebug() << "[DL] size:" << fileSize;
-
-        QFile file(savePath);
-        if (!file.open(QIODevice::ReadWrite)) {
-            const QString errStr = file.errorString();
-            emit q->installError("Ошибка", "Не удалось создать файл: " + savePath + " (" + errStr + ")", savePath, false);
-            mgr->deleteLater(); emit downloadFailed(savePath, errStr); return;
-        }
-        file.resize(fileSize);
-        file.close();
-
-        const qint64 chunkSize = qint64(chunkSizeMB) * 1024 * 1024;
-        QList<Chunk> chunks;
-        for (qint64 pos = 0; pos < fileSize; pos += chunkSize)
-            chunks << Chunk{pos, qMin(pos + chunkSize - 1, fileSize - 1)};
-
-        newDebug() << "[DL] chunks:" << chunks.size() << "parallel:" << maxParallel;
-        downloadChunks(mgr, url, savePath, chunks, maxParallel);
-    });
-}
-
-void MinecraftHandler::downloadSingleStream(const QString& url, const QString& savePath, QNetworkAccessManager* mgr)
-{
-    QNetworkRequest req{QUrl(url)};
-    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    QNetworkReply* reply = mgr->get(req);
-    QFile* file = new QFile(savePath);
-    file->open(QIODevice::WriteOnly);
-
-    auto timer = std::make_shared<QElapsedTimer>();
-    timer->start();
-    auto lastBytes = std::make_shared<qint64>(0);
-
-    connect(reply, &QNetworkReply::readyRead, this, [reply, file]() { file->write(reply->readAll()); });
-    connect(reply, &QNetworkReply::downloadProgress, this, [this, timer, lastBytes](qint64 recv, qint64 total) {
-        if (timer->elapsed() < 200) return;
-        double speed = (recv - *lastBytes) / 1048576.0 / (timer->elapsed() / 1000.0);
-        *lastBytes = recv; timer->restart();
-        if (total > 0)
-            emit q->installProgress("Загрузка сборки",
-                                    QString("%1 / %2 МБ (%3 МБ/с)").arg(recv / 1048576.0, 0, 'f', 1).arg(total / 1048576.0, 0, 'f', 1).arg(speed, 0, 'f', 1),
-                                    double(recv) / double(total));
-    });
-
-    connect(reply, &QNetworkReply::finished, this, [this, reply, file, mgr, savePath]() {
-        const int err = reply->error();
-        const QString errStr = reply->errorString();
-        const qint64 written = file->size();
-        file->close(); file->deleteLater(); reply->deleteLater(); mgr->deleteLater();
-        if (err != QNetworkReply::NoError) {
-            emit q->installError("Ошибка загрузки", errStr, "", true);
-            emit downloadFailed(savePath, errStr);
-            return;
-        }
-        if (written <= 0) {
-            emit q->installError("Ошибка загрузки", "Скачано 0 байт", savePath, true);
-            emit downloadFailed(savePath, "empty file");
-            return;
-        }
-        emit downloadFinished(savePath);
-    });
-}
-
-void MinecraftHandler::downloadChunks(QNetworkAccessManager* mgr, const QString& url, const QString& savePath, const QList<Chunk>& chunks, int maxParallel)
-{
-    auto* file = new QFile(savePath);
-    if (!file->open(QIODevice::ReadWrite)) {
-        newDebug() << "[DL] Cannot open:" << savePath << file->errorString();
-        delete file; mgr->deleteLater();
-        emit q->installError("Ошибка", "Не удалось открыть файл: " + savePath, savePath, true);
-        emit downloadFailed(savePath, "cannot open file");
-        return;
-    }
-
-    QNetworkAccessManager m2, m3, m4;
-    QNetworkAccessManager* managers[4] = { mgr, &m2, &m3, &m4 };
-
-    struct Task {
-        Chunk c;
-        int attempt = 0;
-        int idx = 0;
-        std::shared_ptr<QByteArray> buf;
-    };
-    struct State {
-        int total = 0;
-        qint64 totalBytes = 0;
-        qint64 downloadedBytes = 0;
-        qint64 lastBytes = 0;
-        int active = 0;
-        int completed = 0;
-        int failed = 0;
-        int nextMgr = 0;
-        QElapsedTimer timer;
-        QList<Task> pending;
-    };
-
-    auto state = std::make_shared<State>();
-    state->total = chunks.size();
-    for (const Chunk& c : chunks) state->totalBytes += (c.end - c.start + 1);
-    for (int i = 0; i < chunks.size(); i++) {
-        Task t;
-        t.c = chunks[i];
-        t.idx = i;
-        t.buf = std::make_shared<QByteArray>();
-        state->pending.append(t);
-    }
-    state->timer.start();
-
-    constexpr int MAX_ATTEMPTS = 5;
-    constexpr int NO_DATA_TIMEOUT_MS = 30000;
-
-    newDebug() << "[DL] start, chunks:" << state->total << "parallel:" << maxParallel;
-
-    QEventLoop loop;
-
-    auto pump = std::make_shared<std::function<void()>>();
-    *pump = [this, &loop, &managers, maxParallel, state, pump, file, url, mgr, savePath]() {
-        while (state->active < maxParallel && !state->pending.isEmpty()) {
-            Task task = state->pending.takeFirst();
-            state->active++;
-
-            const qint64 off = task.buf->size();
-            QNetworkRequest req{QUrl(url)};
-            req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-            req.setRawHeader("Range", QString("bytes=%1-%2").arg(task.c.start + off).arg(task.c.end).toUtf8());
-
-            QNetworkReply* reply = managers[state->nextMgr++ % 4]->get(req);
-
-            auto* timeout = new QTimer(reply);
-            timeout->setSingleShot(true);
-            timeout->setInterval(NO_DATA_TIMEOUT_MS);
-            QObject::connect(timeout, &QTimer::timeout, reply, [reply]() { reply->abort(); });
-            timeout->start();
-
-            QObject::connect(reply, &QNetworkReply::readyRead, this, [this, reply, task, state, timeout]() {
-                const QByteArray data = reply->readAll();
-                *task.buf += data;
-                state->downloadedBytes += data.size();
-
-                timeout->start();
-
-                if (state->timer.elapsed() > 200) {
-                    double speed = (state->downloadedBytes - state->lastBytes) / 1048576.0 / (state->timer.elapsed() / 1000.0);
-                    state->lastBytes = state->downloadedBytes;
-                    state->timer.restart();
-                    emit q->installProgress("Загрузка сборки",
-                                            QString("%1 / %2 МБ (%3 МБ/с)").arg(state->downloadedBytes / 1048576.0, 0, 'f', 1).arg(state->totalBytes / 1048576.0, 0, 'f', 1).arg(speed, 0, 'f', 1),
-                                            double(state->downloadedBytes) / double(state->totalBytes));
-                }
-            });
-
-            QObject::connect(reply, &QNetworkReply::finished, this, [this, &loop, state, pump, reply, task, file, off, timeout, mgr, savePath]() {
-                const int errCode = reply->error();
-                const QString errStr = reply->errorString();
-                const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                const int bufSize = task.buf->size();
-                const int expected = int(task.c.end - task.c.start + 1);
-
-                timeout->stop();
-                reply->deleteLater();
-
-                bool ok = (errCode == QNetworkReply::NoError) && (bufSize == expected);
-                if (ok && off > 0 && httpStatus != 206) {
-                    task.buf->clear();
-                    ok = false;
-                }
-                if (ok) {
-                    file->seek(task.c.start);
-                    if (file->write(*task.buf) != expected) ok = false;
-                }
-
-                state->active--;
-
-                if (ok) {
-                    state->completed++;
-                } else if (task.attempt + 1 < MAX_ATTEMPTS) {
-                    newDebug() << "[DL] chunk retry" << task.idx << "attempt" << (task.attempt + 1)
-                    << "http:" << httpStatus << "err:" << errCode << errStr
-                    << "got:" << bufSize << "expected:" << expected;
-                    Task retryTask = task;
-                    retryTask.attempt++;
-                    state->pending.append(retryTask);
-                } else {
-                    state->completed++;
-                    state->failed++;
-                    newDebug() << "[DL] chunk FAILED" << task.idx << "http:" << httpStatus << "err:" << errCode << errStr;
-                }
-
-                if (state->completed >= state->total) {
-                    file->close();
-                    delete file;
-                    mgr->deleteLater();
-                    const int failCount = state->failed;
-                    const bool okFinal = (failCount == 0);
-                    loop.quit();
-                    QMetaObject::invokeMethod(this, [this, failCount, okFinal, savePath]() {
-                        if (!okFinal) {
-                            emit q->installError("Ошибка загрузки",
-                                                 QString("Не удалось скачать %1 чанков").arg(failCount), savePath, true);
-                            emit downloadFailed(savePath, QString("failed %1 chunks").arg(failCount));
-                        } else {
-                            emit downloadFinished(savePath);
-                        }
-                    }, Qt::QueuedConnection);
-                    return;
-                }
-                (*pump)();
-            });
-        }
-    };
-
-    (*pump)();
-    loop.exec();
-}
-
-bool MinecraftHandler::mergeFiles(const QStringList& parts, const QString& outputPath)
-{
-    QFile out(outputPath);
-    if (!out.open(QIODevice::WriteOnly)) { newDebug() << "[Merge] Cannot open:" << outputPath; return false; }
-    for (const QString& part : parts) {
-        QFile in(part);
-        if (!in.open(QIODevice::ReadOnly)) { newDebug() << "[Merge] Cannot open part:" << part; out.close(); return false; }
-        const qint64 totalSize = in.size();
-        qint64 copied = 0;
-        const qint64 bufSize = 4 * 1024 * 1024;
-        while (!in.atEnd()) {
-            QByteArray buf = in.read(bufSize);
-            if (out.write(buf) != buf.size()) {
-                newDebug() << "[Merge] Write failed (disk full?):" << outputPath << out.errorString();
-                in.close(); out.close();
-                return false;
-            }
-            copied += buf.size();
-            emit q->installProgress("Склейка частей",
-                                    QString("%1: %2 / %3 МБ").arg(QFileInfo(part).fileName()).arg(copied / 1048576.0, 0, 'f', 1).arg(totalSize / 1048576.0, 0, 'f', 1),
-                                    totalSize > 0 ? double(copied) / double(totalSize) : 1.0);
-        }
-        in.close();
-    }
-    out.close();
-    return true;
-}
-
-bool MinecraftHandler::extractZip(const QString& zipPath, const QString& targetDir)
-{
-    QFile probe(zipPath);
-    if (!probe.open(QIODevice::ReadOnly)) {
-        newDebug() << "[Zip] Cannot open:" << zipPath;
-        return false;
-    }
-
-    const QByteArray magic = probe.read(4);
-    probe.close();
-
-    if (!magic.startsWith("PK")) {
-        newDebug() << "[Zip] Not a ZIP, magic:" << magic.toHex() << "size:" << QFileInfo(zipPath).size();
-        return false;
-    }
-
-    QZipReader zip(zipPath);
-    if (!zip.isReadable()) {
-        newDebug() << "[Zip] Not readable:" << zipPath;
-        return false;
-    }
-
-    const auto files = zip.fileInfoList();
-    if (files.isEmpty()) {
-        newDebug() << "[Zip] Empty archive";
-        zip.close();
-        return false;
-    }
-
+struct MinecraftHandler::FetchCtx {
+    QString url;
+    int attempt = 0;
+    int retries = 3;
+    bool bind = false;
+    quint64 gen = 0;
+    FetchCb cb;
+};
+
+struct MinecraftHandler::MergeState {
+    QFile out;
+    QFile in;
+    int partIdx = 0;
+    qint64 copied = 0;
+    qint64 total = 0;
+    quint64 gen = 0;
+};
+
+struct MinecraftHandler::ExtractState {
+    std::unique_ptr<QZipReader> zip;
+    QList<QZipReader::FileInfo> files;
     QString prefix;
-
-    while (true) {
-        QSet<QString> topLevel;
-
-        for (const QZipReader::FileInfo& fi : files) {
-            QString path = fi.filePath;
-            path.replace('\\', '/');
-
-            while (path.startsWith('/'))
-                path.remove(0, 1);
-
-            while (path.endsWith('/'))
-                path.chop(1);
-
-            if (!path.startsWith(prefix))
-                continue;
-
-            path = path.mid(prefix.length());
-
-            if (path.isEmpty())
-                continue;
-
-            const int slash = path.indexOf('/');
-            topLevel.insert(slash < 0 ? path : path.left(slash));
-        }
-
-        if (topLevel.size() != 1)
-            break;
-
-        const QString candidate = *topLevel.constBegin();
-        bool validWrapper = true;
-        bool hasContent = false;
-
-        for (const QZipReader::FileInfo& fi : files) {
-            QString path = fi.filePath;
-            path.replace('\\', '/');
-
-            while (path.startsWith('/'))
-                path.remove(0, 1);
-
-            while (path.endsWith('/'))
-                path.chop(1);
-
-            if (!path.startsWith(prefix))
-                continue;
-
-            path = path.mid(prefix.length());
-
-            if (path.isEmpty() || path == candidate)
-                continue;
-
-            if (!path.startsWith(candidate + "/")) {
-                validWrapper = false;
-                break;
-            }
-
-            hasContent = true;
-        }
-
-        if (!validWrapper || !hasContent)
-            break;
-
-        prefix += candidate + "/";
-        newDebug() << "[Zip] Stripping wrapper:" << prefix;
-    }
-
-    if (prefix.isEmpty())
-        newDebug() << "[Zip] No wrapper folder, extracting normally";
-
-    QDir().mkpath(targetDir);
-
-    int done = 0;
+    QString targetDir;
+    QString targetClean;
+    int index = 0;
     int written = 0;
     int failed = 0;
-    const int total = files.size();
+    QString firstError;
+    quint64 gen = 0;
+};
 
-    for (const QZipReader::FileInfo& fi : files) {
-        QString rel = fi.filePath;
-        rel.replace('\\', '/');
-
-        while (rel.startsWith('/'))
-            rel.remove(0, 1);
-
-        while (rel.endsWith('/'))
-            rel.chop(1);
-
-        if (rel.isEmpty()) {
-            done++;
-            continue;
-        }
-
-        if (!prefix.isEmpty()) {
-            if (!rel.startsWith(prefix)) {
-                done++;
-                continue;
-            }
-
-            rel = rel.mid(prefix.length());
-        }
-
-        if (rel.isEmpty()) {
-            done++;
-            continue;
-        }
-
-        const QString outPath = QDir(targetDir).absoluteFilePath(rel);
-
-        if (fi.isDir) {
-            if (!QDir().mkpath(outPath)) {
-                newDebug() << "[Zip] Cannot create directory:" << outPath;
-                failed++;
-            }
-        } else {
-            QDir().mkpath(QFileInfo(outPath).absolutePath());
-
-            QFile out(outPath);
-
-            if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                newDebug() << "[Zip] Cannot write:" << outPath << out.errorString();
-                failed++;
-            } else {
-                const QByteArray data = zip.fileData(fi.filePath);
-
-                if (data.isEmpty() && fi.size > 0) {
-                    newDebug() << "[Zip] Cannot read:" << fi.filePath;
-                    failed++;
-                } else if (out.write(data) != data.size()) {
-                    newDebug() << "[Zip] Failed to write:" << outPath;
-                    failed++;
-                } else {
-                    written++;
-                }
-
-                out.close();
-            }
-        }
-
-        done++;
-
-        if (done % 50 == 0 || done == total)
-            emit q->installProgress(
-                "Распаковка сборки",
-                QString("%1 / %2").arg(done).arg(total),
-                total > 0 ? double(done) / double(total) : 1.0
-                );
-    }
-
-    zip.close();
-
-    newDebug() << "[Zip] Done."
-               << "written:" << written
-               << "failed:" << failed
-               << "wrapper:" << (prefix.isEmpty() ? "<none>" : prefix);
-
-    return written > 0 && failed == 0;
-}
-
-
-void MinecraftHandler::installModpack(const QString& baseUrl, const QString& gamePath, int partCount)
+MinecraftHandler::MinecraftHandler(QObject *parent)
+    : QObject(parent), m_manager(new QNetworkAccessManager(this))
 {
-    QDir().mkpath(gamePath);
-    QStringList partPaths, partUrls;
-    if (partCount <= 1) { partPaths << gamePath + "/modpack.zip"; partUrls << baseUrl; }
-    else for (int i = 1; i <= partCount; i++) {
-            partPaths << QString("%1/modpack.part%2").arg(gamePath).arg(i);
-            partUrls << QString("%1/modpack.part%2").arg(baseUrl).arg(i);
-        }
+    m_batch = new DownloadBatch(this);
+    m_ranged = new RangedDownload(this);
 
-    struct State {
-        int index = 0;
-        bool aborted = false;
-    };
-    auto state = std::make_shared<State>();
+    m_progressThrottle = new QTimer(this);
+    m_progressThrottle->setInterval(100);
+    connect(m_progressThrottle, &QTimer::timeout, this, &MinecraftHandler::flushProgress);
 
-    auto downloadNext = std::make_shared<std::function<void()>>();
-    *downloadNext = [this, state, partUrls, partPaths, gamePath, partCount, downloadNext]() {
-        if (state->aborted) return;
-        if (state->index >= partUrls.size()) {
-            onAllPartsDownloaded(partPaths, gamePath, partCount);
-            return;
-        }
-
-        int i = state->index++;
-        newDebug() << "[Modpack] Downloading part" << (i + 1) << "of" << partUrls.size();
-
-        const QString expectedPath = partPaths[i];
-
-        QMetaObject::Connection* okConn = new QMetaObject::Connection();
-        QMetaObject::Connection* failConn = new QMetaObject::Connection();
-
-        // Сверяем путь: downloadFinished/downloadFailed — общие сигналы класса,
-        // их может эмитить не связанная с этой сборкой операция (например,
-        // параллельная загрузка установщика лоадера). Реагируем только на
-        // событие именно этой части архива.
-        *okConn = connect(this, &MinecraftHandler::downloadFinished, this,
-                           [this, downloadNext, okConn, failConn, expectedPath](const QString& path) {
-            if (QDir::cleanPath(path) != QDir::cleanPath(expectedPath))
-                return;
-            disconnect(*okConn); disconnect(*failConn);
-            delete okConn; delete failConn;
-            QMetaObject::invokeMethod(this, [downloadNext]() { (*downloadNext)(); }, Qt::QueuedConnection);
-        });
-        *failConn = connect(this, &MinecraftHandler::downloadFailed, this,
-                             [this, state, okConn, failConn, expectedPath](const QString& path, const QString& reason) {
-            if (QDir::cleanPath(path) != QDir::cleanPath(expectedPath))
-                return;
-            disconnect(*okConn); disconnect(*failConn);
-            delete okConn; delete failConn;
-            state->aborted = true;
-            newDebug() << "[Modpack] aborted on part" << state->index << "reason:" << reason;
-            emit q->installError("Ошибка", "Не удалось скачать часть архива", expectedPath, true);
-        });
-
-        emit q->installProgress("Загрузка сборки", QString("Часть %1 из %2").arg(i + 1).arg(partUrls.size()), 0.0);
-        downloadFileParallel(partUrls[i], partPaths[i], 4, 16);
-    };
-    (*downloadNext)();
-}
-
-void MinecraftHandler::onAllPartsDownloaded(const QStringList& partPaths, const QString& gamePath, int partCount)
-{
-    QString finalZip = gamePath + "/modpack.zip";
-    newDebug() << "[Modpack] gamePath:" << gamePath << "parts:" << partCount;
-    for (const QString& p : partPaths) {
-        QFileInfo fi(p);
-        newDebug() << "[Modpack] part:" << p << "exists:" << fi.exists() << "size:" << fi.size();
-    }
-
-    auto doExtract = [=, this]() {
-        emit q->installProgress("Распаковка сборки", "Подготовка...", 0.0);
-
-        const bool extracted = extractZip(finalZip, gamePath);
-        if (!extracted) {
-            newDebug() << "[Modpack] extractZip FAILED for" << finalZip << "- keeping files for inspection";
-        }
-
-        QFile::remove(finalZip);
-        for (const QString& p : partPaths) QFile::remove(p);
-        setBuildExists(true);
-        emit q->installProgress("Готово", "Сборка установлена", 1.0);
-        emit installFinished();
-        emit finished();
-    };
-
-    if (partCount > 1) {
-        emit q->installProgress("Склейка частей", "Начало...", 0.0);
-        if (!mergeFiles(partPaths, finalZip)) { emit q->installError("Ошибка", "Не удалось склеить части", "", true); return; }
-        doExtract();
-    } else doExtract();
-}
-
-bool MinecraftHandler::downloadFile(const QString& url, const QString& savePath,
-                                    int timeoutMs, int retries)
-{
-    for (int attempt = 0; attempt <= retries; attempt++) {
-        newDebug() << "[Download] attempt" << attempt << "url:" << url;
-
-        QDir().mkpath(QFileInfo(savePath).absolutePath());
-
-        QNetworkAccessManager manager;
-        QEventLoop loop;
-        QTimer watchdog;
-        watchdog.setSingleShot(true);
-        watchdog.setInterval(timeoutMs);
-
-        QNetworkRequest req{QUrl(url)};
-        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                         QNetworkRequest::NoLessSafeRedirectPolicy);
-
-        QNetworkReply* reply = manager.get(req);
-        QFile* file = new QFile(savePath);
-
-        if (!file->open(QIODevice::WriteOnly)) {
-            newDebug() << "[Download] Cannot open:" << savePath << file->errorString();
-            delete file;
-            reply->deleteLater();
-            return false;
-        }
-
-        QObject::connect(reply, &QNetworkReply::downloadProgress, this,
-                         [this, &watchdog, url](qint64 recv, qint64 total) {
-                             watchdog.start();
-                             if (total > 0) {
-                                 emit q->installProgress("Загрузка Minecraft",
-                                                         QString("%1 / %2 МБ")
-                                                             .arg(recv / 1048576.0, 0, 'f', 1)
-                                                             .arg(total / 1048576.0, 0, 'f', 1),
-                                                         double(recv) / double(total));
-                             }
-                         });
-
-        QObject::connect(reply, &QNetworkReply::readyRead,
-                         [reply, file]() { file->write(reply->readAll()); });
-        QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-        QObject::connect(&watchdog, &QTimer::timeout, &loop, [&]() {
-            newDebug() << "[Download] TIMEOUT" << timeoutMs << "ms:" << url;
-            reply->abort();
-            loop.quit();
-        });
-
-        watchdog.start();
-        loop.exec();
-
-        const int err = reply->error();
-        const QString errStr = reply->errorString();
-        file->close();
-        file->deleteLater();
-        reply->deleteLater();
-
-        const qint64 written = QFileInfo(savePath).size();
-        newDebug() << "[Download] result err:" << err << errStr << "written:" << written;
-
-        if (err == QNetworkReply::NoError && written > 0)
-            return true;
-
-        QFile::remove(savePath);
-        if (attempt < retries) {
-            newDebug() << "[Download] retrying in 500 ms";
-            QThread::msleep(500);
-        }
-    }
-
-    newDebug() << "[Download] ALL ATTEMPTS FAILED:" << url;
-    return false;
-}
-
-void MinecraftHandler::downloadVanillaFiles(const QString& gamePath, const QString& mcVersion)
-{
-    const QString vanillaJson = gamePath + "/versions/" + mcVersion + "/" + mcVersion + ".json";
-    const QString vanillaJar  = gamePath + "/versions/" + mcVersion + "/" + mcVersion + ".jar";
-
-    if (!QFile::exists(vanillaJson)) {
-        newDebug() << "[Vanilla] Downloading JSON";
-        QString manifestStr = fetchUrl("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json");
-        if (manifestStr.isEmpty()) return;
-        QJsonObject manifest = QJsonDocument::fromJson(manifestStr.toUtf8()).object();
-        QString vanillaUrl;
-        for (const QJsonValue& v : manifest["versions"].toArray()) {
-            QJsonObject ver = v.toObject();
-            if (ver["id"].toString() == mcVersion) { vanillaUrl = ver["url"].toString(); break; }
-        }
-        if (vanillaUrl.isEmpty()) return;
-        QDir().mkpath(gamePath + "/versions/" + mcVersion);
-        downloadFile(vanillaUrl, vanillaJson);
-    }
-
-    QFile vf(vanillaJson);
-    if (!vf.open(QIODevice::ReadOnly)) return;
-    QJsonObject vJson = QJsonDocument::fromJson(vf.readAll()).object();
-    vf.close();
-
-    QString clientUrl = vJson["downloads"].toObject()["client"].toObject()["url"].toString();
-    if (!clientUrl.isEmpty() && !QFile::exists(vanillaJar)) {
-        emit q->installProgress("Скачивание Minecraft", "client.jar", 0.0);
-        downloadFile(clientUrl, vanillaJar);
-    }
-
-    downloadVanillaLibraries(gamePath);
-    QString assetIndexId = vJson["assetIndex"].toObject()["id"].toString();
-    if (assetIndexId.isEmpty()) assetIndexId = mcVersion;
-    downloadAssets(gamePath, assetIndexId);
-}
-
-void MinecraftHandler::installVanilla(const QString& mcVersion)
-{
-    newDebug() << "[Vanilla] Installing" << mcVersion;
-    QString gamePath = sm->gameDir() + "/" + m_buildName;
-    QDir().mkpath(gamePath);
-    downloadVanillaFiles(gamePath, mcVersion);
-    setBuildExists(true);
-    sc->closeProgressPanel(view);
-    emit installFinished();
-    emit finished();
-}
-
-void MinecraftHandler::installFabric(const QString& mcVersion, const QString& loaderVersion)
-{
-    newDebug() << "[Fabric] Installing loader" << loaderVersion << "for MC" << mcVersion;
-    QString gamePath = sm->gameDir() + "/" + m_buildName;
-    QDir().mkpath(gamePath);
-
-    downloadVanillaFiles(gamePath, mcVersion);
-
-    QString metaUrl = QString("https://meta.fabricmc.net/v2/versions/loader/%1/%2/profile/json").arg(mcVersion, loaderVersion);
-    newDebug() << "[Fabric] Fetching profile:" << metaUrl;
-    QString profileJson = fetchUrl(metaUrl);
-    if (profileJson.isEmpty()) { emit q->installError("Ошибка", "Не удалось получить профиль Fabric", metaUrl, true); return; }
-
-    const QString fabricVersionId = QString("fabric-loader-%1-%2").arg(loaderVersion, mcVersion);
-    const QString versionDir = gamePath + "/versions/" + fabricVersionId;
-    QDir().mkpath(versionDir);
-
-    QFile jsonFile(versionDir + "/" + fabricVersionId + ".json");
-    if (!jsonFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) { emit q->installError("Ошибка", "Не удалось сохранить JSON Fabric", versionDir, false); return; }
-    jsonFile.write(profileJson.toUtf8());
-    jsonFile.close();
-
-    QJsonObject fabricJson = QJsonDocument::fromJson(profileJson.toUtf8()).object();
-    downloadLibrariesFromJson(fabricJson, gamePath);
-
-    finalizeInstall(gamePath);
-}
-
-void MinecraftHandler::installForge(const QString& mcVersion, const QString& forgeVersion)
-{
-    newDebug() << "[Forge] Installing" << forgeVersion << "for MC" << mcVersion;
-    QString gamePath = sm->gameDir() + "/" + m_buildName;
-    QDir().mkpath(gamePath);
-
-    QString installerUrl = QString("https://maven.minecraftforge.net/net/minecraftforge/forge/%1-%2/forge-%1-%2-installer.jar").arg(mcVersion, forgeVersion);
-    QString installerPath = gamePath + "/forge-installer.jar";
-
-    emit q->installProgress("Установка Forge", "Подготовка...", 0.0);
-    downloadVanillaFiles(gamePath, mcVersion);
-    ensureLauncherProfile(gamePath);
-
-    QNetworkAccessManager mgr; QEventLoop loop;
-    QNetworkRequest req{QUrl(installerUrl)};
-    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    QNetworkReply* reply = mgr.get(req);
-    QFile* file = new QFile(installerPath);
-    if (!file->open(QIODevice::WriteOnly)) {
-        delete file; reply->deleteLater();
-        emit q->installError("Ошибка", "Не удалось создать файл установщика", installerPath, false);
-        return;
-    }
-    connect(reply, &QNetworkReply::downloadProgress, this, [this](qint64 recv, qint64 total) {
-        if (total > 0)
-            emit q->installProgress("Установка Forge",
-                                    QString("Загрузка установщика: %1 / %2 МБ").arg(recv / 1048576.0, 0, 'f', 1).arg(total / 1048576.0, 0, 'f', 1),
-                                    double(recv) / double(total) * 0.1);
+    m_fetchRetryTimer = new QTimer(this);
+    m_fetchRetryTimer->setSingleShot(true);
+    m_fetchRetryTimer->setInterval(30000);
+    connect(m_fetchRetryTimer, &QTimer::timeout, this, [this]() {
+        if (!m_offline) return;
+        fetchBuildsList();
+        fetchNews();
     });
-    connect(reply, &QNetworkReply::readyRead, [reply, file]() { file->write(reply->readAll()); });
-    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
-    file->close(); file->deleteLater();
+}
 
-    const int dlErr = reply->error();
-    const QString dlErrStr = reply->errorString();
-    reply->deleteLater();
-    if (dlErr != QNetworkReply::NoError) { emit q->installError("Ошибка", "Не удалось скачать установщик Forge: " + dlErrStr, installerUrl, true); return; }
-
-    QProcess* installer = new QProcess(this);
-    installer->setWorkingDirectory(gamePath);
-    installer->setProcessChannelMode(QProcess::MergedChannels);
-
-    auto* buffer = new QString();
-    auto* processorStep = new int(0);
-
-    connect(installer, &QProcess::readyReadStandardOutput, this, [this, installer, buffer, processorStep]() {
-        buffer->append(QString::fromLocal8Bit(installer->readAllStandardOutput()));
-        buffer->replace("\r\n", "\n"); buffer->replace('\r', '\n');
-        if (buffer->size() > 200000) *buffer = buffer->right(4000);
-
-        static int downloadCount = 0;
-        int nl;
-        while ((nl = buffer->indexOf('\n')) >= 0) {
-            QString line = buffer->left(nl).trimmed();
-            buffer->remove(0, nl + 1);
-            if (line.isEmpty()) continue;
-            newDebug() << "+[ForgeInstaller]" << line;
-
-            double p = -1.0;
-            QString stage = "Установка Forge";
-            QString details = line;
-
-            if (line.contains("Extracting json", Qt::CaseInsensitive)) {
-                stage = "Чтение профиля"; p = 0.12;
-            } else if (line.contains("Considering minecraft", Qt::CaseInsensitive)) {
-                stage = "Проверка Minecraft"; p = 0.18;
-            } else if (line.contains("Downloading libraries", Qt::CaseInsensitive)) {
-                stage = "Скачивание библиотек";
-                details = "Подготовка...";
-                p = 0.25;
-                downloadCount = 0;
-            } else if (line.startsWith("Downloading", Qt::CaseInsensitive) ||
-                       line.startsWith("Downloaded", Qt::CaseInsensitive)) {
-                QString file = line;
-                file.remove(QRegularExpression(R"(^Download(ing|ed):?\s*)"));
-                if (file.length() > 80) file = file.left(30) + "..." + file.right(40);
-                stage = "Скачивание библиотек";
-                details = file;
-                downloadCount++;
-                p = 0.25 + qMin(0.20, downloadCount * 0.005);
-            } else if (line.contains("Downloading asset", Qt::CaseInsensitive)) {
-                stage = "Скачивание ресурсов";
-                details = "Ассеты Minecraft";
-                p = 0.45;
-            } else if (line.contains("Running processor", Qt::CaseInsensitive)) {
-                (*processorStep)++;
-                p = 0.50 + qMin(1.0, *processorStep / 8.0) * 0.40;
-                stage = QString("Ремаппинг (%1)").arg(*processorStep);
-            } else if (line.contains("Building processor classpath", Qt::CaseInsensitive)) {
-                stage = "Финальная сборка"; p = 0.92;
-            } else if (line.contains("Patching minecraft", Qt::CaseInsensitive)) {
-                stage = "Патчинг Minecraft"; p = 0.95;
-            } else if (line.contains("Installation complete", Qt::CaseInsensitive) ||
-                       line.contains("You can now play", Qt::CaseInsensitive) ||
-                       line.contains("The installation was successful", Qt::CaseInsensitive)) {
-                stage = "Готово"; p = 1.0;
-            }
-
-            m_pendingStage = "Установка Forge";
-            m_pendingDetails = details;
-            if (p >= 0.0) m_pendingProgress = p;
-            m_hasPendingUpdate = true;
-            if (!m_progressThrottle->isActive()) m_progressThrottle->start();
-        }
-    });
-
-    connect(installer, &QProcess::readyReadStandardError, this, [installer]() {
-        QString err = QString::fromLocal8Bit(installer->readAllStandardError());
-        if (!err.trimmed().isEmpty()) newDebug() << "-[ForgeInstaller ERROR]" << err.trimmed();
-    });
-
-    connect(installer, &QProcess::finished, this, [this, installer, gamePath, installerPath, buffer, processorStep](int exitCode, QProcess::ExitStatus status) {
-        delete buffer; delete processorStep;
-        installer->deleteLater();
-
-        if (status != QProcess::NormalExit || exitCode != 0) {
-            newDebug() << "[Forge] Installer failed, exitCode:" << exitCode;
-            emit q->installError("Ошибка установки Forge", QString("Установщик завершился с кодом %1").arg(exitCode), "", true);
-            return;
-        }
-
-        newDebug() << "[Forge] Installation successful";
-        QFile::remove(installerPath);
-        finalizeInstall(gamePath);
-    });
-
-    installer->start(sm->javaPath(), QStringList() << "-jar" << installerPath << "--installClient" << gamePath);
-    if (!installer->waitForStarted(10000)) {
-        delete buffer; delete processorStep;
-        installer->deleteLater();
-        emit q->installError("Ошибка запуска", "Не удалось запустить установщик Forge: " + installer->errorString(), "", false);
+MinecraftHandler::~MinecraftHandler()
+{
+    if (m_installerProc) {
+        m_installerProc->disconnect(this);
+        m_installerProc->kill();
+        m_installerProc->waitForFinished(1000);
     }
+}
+
+void MinecraftHandler::Initialize(QQuickView* v, QmlHandler* _q, SettingsManager* _sm, SettingsController* _sc)
+{
+    view = v; q = _q; sm = _sm; sc = _sc;
+}
+
+QString MinecraftHandler::gamePathFor(const QString& name) const
+{
+    return sm->gameDir() + QLatin1Char('/') + name;
+}
+
+QString MinecraftHandler::versionIdFor(const BuildSpec& s)
+{
+    if (s.loader == QLatin1String("vanilla"))  return s.mcVersion;
+    if (s.loader == QLatin1String("fabric"))   return QStringLiteral("fabric-loader-%1-%2").arg(s.loaderVersion, s.mcVersion);
+    if (s.loader == QLatin1String("forge"))    return QStringLiteral("%1-forge-%2").arg(s.mcVersion, s.loaderVersion);
+    if (s.loader == QLatin1String("neoforge")) return QStringLiteral("neoforge-%1").arg(s.loaderVersion);
+    return s.mcVersion;
 }
 
 QString MinecraftHandler::getVersionId() const
 {
-    if (m_buildLoader == "vanilla") return m_mcVersion;
-    if (m_buildLoader == "fabric") return QString("fabric-loader-%1-%2").arg(m_buildVersion, m_mcVersion);
-    if (m_buildLoader == "forge") return QString("%1-forge-%2").arg(m_mcVersion, m_buildVersion);
-    if (m_buildLoader == "neoforge") return QString("neoforge-%1").arg(m_buildVersion);
-    return m_mcVersion;
+    return versionIdFor(m_sel);
 }
 
-QString MinecraftHandler::getVersionJsonPath(const QString& gamePath) const
+void MinecraftHandler::setBuildExists(bool v)
 {
-    const QString id = getVersionId();
-    return gamePath + "/versions/" + id + "/" + id + ".json";
-}
-
-bool MinecraftHandler::launchMinecraft(const QStringList& command, const QString& gamePath){
-    if (m_minecraftProcess && m_minecraftProcess->state() != QProcess::NotRunning) {
-        newDebug() << "[MC] Minecraft already running (pid:"
-                   << m_minecraftProcess->processId() << "), refusing to start another";
-        return false;
-    }
-
-    if (command.isEmpty()) {
-        newDebug() << "[MC] Empty command, aborting";
-        emit q->installError("Ошибка", "Команда запуска пуста", "", false);
-        return false;
-    }
-
-    QString javaPath = m_launchJavaPath.isEmpty()
-                           ? sm->javaPath().trimmed()
-                           : m_launchJavaPath.trimmed();
-    newDebug() << "[MC] Launching with Java:" << javaPath;
-    QProcess* proc = new QProcess(this);
-    QString argsFilePath = gamePath + "/launch_args.txt";
-    QFile argsFile(argsFilePath);
-
-    if (!argsFile.open(QIODevice::WriteOnly)){
-        newDebug() << "ERROR: Ошибка открытия файла аргументов";
-        emit q->installError("Ошибка", "Ошибка открытия файла аргументов запуска jvm", "", false);
-        return false;
-    }
-
-    QByteArray buf;
-    for (const QString& arg : command) {
-        if (arg.contains(' ')) {
-            QString escaped = arg;
-            escaped.replace("\"", "\\\"");
-            buf += '"' + escaped.toUtf8() + "\"\n";
-        } else {
-            buf += arg.toUtf8() + "\n";
-        }
-    }
-    argsFile.write(buf);
-    argsFile.close();
-
-    javaPath = QDir::toNativeSeparators(javaPath);
-    m_minecraftProcess = proc;
-    proc->setWorkingDirectory(gamePath);
-
-    connect(proc, &QProcess::readyReadStandardOutput, this, [proc](){
-        newDebug() << "[Minecraft Process] DEBUG: " << QString::fromLocal8Bit(proc->readAllStandardOutput());
-    });
-    connect(proc, &QProcess::readyReadStandardError, this, [proc](){
-        newDebug() << "[Minecraft Process] ERROR: " << QString::fromLocal8Bit(proc->readAllStandardError());
-    });
-    connect(proc, &QProcess::finished, this, [this, proc](int exitCode, QProcess::ExitStatus exitStatus){
-        if (exitStatus == QProcess::NormalExit && exitCode == 0)
-            newDebug() << "[Minecraft Process] finished normally";
-        else
-            newDebug() << "[Minecraft Process] exitCode:" << exitCode;
-        if (m_minecraftProcess == proc) m_minecraftProcess = nullptr;
-        proc->deleteLater();
-        emit minecraftStopped();
-    });
-
-    QStringList shortCommand;
-    shortCommand << "@" + QDir::toNativeSeparators(argsFilePath);
-    proc->start(javaPath, shortCommand);
-
-    newDebug() << "[MC] Starting:" << javaPath << "argfile:" << argsFilePath << "cwd:" << gamePath;
-
-    if (!proc->waitForStarted(5000)){
-        newDebug() << "[MC] Didn't start:" << proc->errorString();
-        emit q->installError("Ошибка", "Майнкрафт не запустился: " + proc->errorString(), "", false);
-        return false;
-    }
-
-    emit minecraftStarted();
-    return true;
-}
-
-void MinecraftHandler::setBuildExists(bool v){
     if (m_buildExists == v) return;
     m_buildExists = v;
     emit buildExistsChanged();
 }
 
-void MinecraftHandler::setUpdateAvailable(bool v){
+void MinecraftHandler::setUpdateAvailable(bool v)
+{
     if (m_updateAvailable == v) return;
     m_updateAvailable = v;
     emit updateAvailableChanged();
 }
 
-void MinecraftHandler::setInstallation(bool v){
+void MinecraftHandler::setInstallation(bool v)
+{
     if (m_installation == v) return;
     m_installation = v;
     emit installationChanged();
+}
+
+void MinecraftHandler::setCanDelete(bool v)
+{
+    if (m_canDelete == v) return;
+    m_canDelete = v;
+    emit canDeleteChanged();
+}
+
+void MinecraftHandler::setBusy(bool v)
+{
+    if (m_busy == v) return;
+    m_busy = v;
+    emit busyChanged();
+}
+
+void MinecraftHandler::setOffline(bool v)
+{
+    if (m_offline == v) return;
+    m_offline = v;
+    emit offlineChanged();
+}
+
+void MinecraftHandler::refreshSelectedState()
+{
+    bool exists = false;
+    bool update = false;
+    bool hasFiles = false;
+
+    const bool activeIsSelected = m_installing && !m_sel.name.isEmpty() && m_job.name == m_sel.name;
+
+    if (sm && !m_sel.name.isEmpty() && isSafeBuildName(m_sel.name)) {
+        const QString gp = gamePathFor(m_sel.name);
+        hasFiles = QDir(gp).exists();
+
+        if (!activeIsSelected && hasFiles) {
+            const bool interrupted = QFileInfo::exists(gp + QStringLiteral("/installation"));
+            const bool hasVersion = QFileInfo::exists(versionJsonFile(gp, versionIdFor(m_sel)));
+            exists = hasVersion && !interrupted;
+
+            if (exists) {
+                m_installedPackVersion = readInstalledPackVersion(gp);
+                update = (m_installedPackVersion != m_sel.packVersion);
+            }
+        }
+    }
+
+    newDebug() << "[State]" << m_sel.name << "exists:" << exists << "update:" << update
+               << "installing:" << activeIsSelected << "hasFiles:" << hasFiles;
+
+    setInstallation(activeIsSelected);
+    setBuildExists(exists);
+    setUpdateAvailable(update);
+    setCanDelete(hasFiles && !activeIsSelected);
+}
+
+void MinecraftHandler::reCheckBuilds(const QString& build, const QString& version, const QString& loader,
+                                     const QString& mcVer, const QString& git, const int parts, const QString& packVer)
+{
+    newDebug() << "Rechecking build:" << build << "MC" << mcVer << loader << version << "pack" << packVer;
+
+    m_sel.name = build;
+    m_sel.loaderVersion = version;
+    m_sel.loader = loader.isEmpty() ? QStringLiteral("vanilla") : loader;
+    m_sel.mcVersion = mcVer;
+    m_sel.archiveLink = git;
+    m_sel.parts = qMax(1, parts);
+    m_sel.packVersion = packVer.isEmpty() ? QStringLiteral("0.1") : packVer;
+
+    refreshSelectedState();
+}
+
+QString MinecraftHandler::readInstalledPackVersion(const QString& gamePath) const
+{
+    const QJsonObject o = readJsonObject(gamePath + QStringLiteral("/sealauncher_meta.json"));
+    const QString ver = o.value(QStringLiteral("packVersion")).toString();
+    return ver.isEmpty() ? QStringLiteral("0.1") : ver;
+}
+
+bool MinecraftHandler::loaderAlreadyInstalled(const QString& gamePath, const BuildSpec& spec) const
+{
+    const QJsonObject o = readJsonObject(gamePath + QStringLiteral("/sealauncher_meta.json"));
+    if (o.isEmpty()) return false;
+    if (o.value(QStringLiteral("loader")).toString() != spec.loader) return false;
+    if (o.value(QStringLiteral("loaderVersion")).toString() != spec.loaderVersion) return false;
+    if (o.value(QStringLiteral("mcVersion")).toString() != spec.mcVersion) return false;
+    return QFileInfo::exists(versionJsonFile(gamePath, versionIdFor(spec)));
+}
+
+void MinecraftHandler::writeBuildMeta(const QString& gamePath, const BuildSpec& spec)
+{
+    QJsonObject o;
+    o[QStringLiteral("packVersion")] = spec.packVersion;
+    o[QStringLiteral("loaderVersion")] = spec.loaderVersion;
+    o[QStringLiteral("loader")] = spec.loader;
+    o[QStringLiteral("mcVersion")] = spec.mcVersion;
+    o[QStringLiteral("git")] = spec.archiveLink;
+    o[QStringLiteral("parts")] = spec.parts;
+    o[QStringLiteral("installedAt")] = double(QDateTime::currentSecsSinceEpoch());
+
+    if (!writeFileAtomic(gamePath + QStringLiteral("/sealauncher_meta.json"),
+                         QJsonDocument(o).toJson(QJsonDocument::Indented)))
+        newDebug() << "[Meta] Cannot write meta in" << gamePath;
+    else
+        newDebug() << "[Meta] Written pack version:" << spec.packVersion;
+}
+
+void MinecraftHandler::writeInstallMarker(const QString& gamePath) const
+{
+    QFile f(gamePath + QStringLiteral("/installation"));
+    if (f.open(QIODevice::WriteOnly)) f.write("1");
+}
+
+void MinecraftHandler::removeInstallMarker(const QString& gamePath) const
+{
+    QFile::remove(gamePath + QStringLiteral("/installation"));
+}
+
+void MinecraftHandler::prepareForUpdate(const QString& gamePath, bool keepLoader)
+{
+    QStringList keep = {
+        QStringLiteral("saves"), QStringLiteral("options.txt"), QStringLiteral("optionsof.txt"),
+        QStringLiteral("servers.dat"), QStringLiteral("screenshots"), QStringLiteral("resourcepacks"),
+        QStringLiteral("shaderpacks"), QStringLiteral("sealauncher_meta.json"), QStringLiteral("assets"),
+        QStringLiteral("installation"), QStringLiteral(".sl_tmp")
+    };
+    if (keepLoader) keep << QStringLiteral("versions") << QStringLiteral("libraries");
+
+    const QFileInfoList entries = QDir(gamePath).entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
+    for (const QFileInfo& fi : entries) {
+        if (keep.contains(fi.fileName(), Qt::CaseInsensitive)) continue;
+
+        bool ok = fi.isDir() && !fi.isSymLink()
+                      ? QDir(fi.absoluteFilePath()).removeRecursively()
+                      : QFile::remove(fi.absoluteFilePath());
+        if (!ok) newDebug() << "[Update] Failed to remove:" << fi.absoluteFilePath();
+    }
+}
+
+void MinecraftHandler::reportProgress(const QString& stage, const QString& details, double progress, bool immediate)
+{
+    if (!m_installing || !q) return;
+
+    m_pendingStage = stage;
+    m_pendingDetails = details;
+    m_pendingProgress = progress;
+    m_hasPendingUpdate = true;
+
+    if (immediate || !m_progressClock.isValid() || m_progressClock.elapsed() >= 100)
+        flushProgress();
+}
+
+void MinecraftHandler::flushProgress()
+{
+    if (!m_hasPendingUpdate || !m_installing || !q) return;
+    m_hasPendingUpdate = false;
+    m_progressClock.restart();
+    emit q->installProgress(m_pendingStage, m_pendingDetails, m_pendingProgress);
+}
+
+void MinecraftHandler::defer(quint64 gen, std::function<void()> fn)
+{
+    QTimer::singleShot(0, this, [this, gen, fn = std::move(fn)]() {
+        if (gen != m_opGen || !m_installing) return;
+        fn();
+    });
+}
+
+void MinecraftHandler::beginInstall(const BuildSpec& spec, bool update)
+{
+    if (m_installing || !sm || !q) return;
+
+    auto reject = [this, &spec](const QString& title, const QString& msg, const QString& details) {
+        emit q->installError(title, msg, details, false);
+        emit installFailed(spec.name, msg, false);
+    };
+
+    if (!isSafeBuildName(spec.name)) {
+        reject(QStringLiteral("Некорректное имя сборки"),
+               QStringLiteral("Имя «%1» нельзя использовать как имя папки.").arg(spec.name), QString());
+        return;
+    }
+
+    const QString gamePath = gamePathFor(spec.name);
+    if (!QDir().mkpath(gamePath)) {
+        reject(QStringLiteral("Не удалось создать папку сборки"),
+               QStringLiteral("Проверьте путь установки и права на запись."), gamePath);
+        return;
+    }
+
+    const QStorageInfo storage(gamePath);
+    if (storage.isValid() && storage.bytesAvailable() >= 0 && storage.bytesAvailable() < kMinFreeSpaceBytes) {
+        reject(QStringLiteral("Недостаточно места на диске"),
+               QStringLiteral("Для установки нужно не менее 1 ГБ свободного места (сейчас %1 МБ).")
+                   .arg(storage.bytesAvailable() / 1048576), gamePath);
+        return;
+    }
+
+    m_job = spec;
+    m_jobUpdate = update;
+    m_jobPath = gamePath;
+    m_tmpDir = gamePath + QStringLiteral("/.sl_tmp");
+    m_jobSkipLoader = update && !spec.archiveLink.trimmed().isEmpty() && loaderAlreadyInstalled(gamePath, spec);
+    m_zipPath.clear();
+    m_installerAttempt = 0;
+    m_retryFn = nullptr;
+    m_failedJobName.clear();
+
+    ++m_opGen;
+    m_installing = true;
+
+    QDir().mkpath(m_tmpDir);
+    writeInstallMarker(gamePath);
+
+    m_progressClock.invalidate();
+    m_progressThrottle->start();
+    setBusy(true);
+    refreshSelectedState();
+
+    newDebug() << "[Install] begin" << spec.name << "MC" << spec.mcVersion << spec.loader << spec.loaderVersion
+               << "update:" << update << "skipLoader:" << m_jobSkipLoader;
+
+    reportProgress(update ? QStringLiteral("Обновление сборки") : QStringLiteral("Установка сборки"),
+                   spec.name, -1.0, true);
+    stageArchive();
+}
+
+void MinecraftHandler::endJob()
+{
+    m_installing = false;
+    ++m_opGen;
+
+    m_progressThrottle->stop();
+    m_hasPendingUpdate = false;
+
+    if (m_batch) m_batch->cancel();
+    if (m_ranged) m_ranged->cancel();
+
+    if (m_installerProc) {
+        m_installerProc->disconnect(this);
+        m_installerProc->kill();
+        m_installerProc->deleteLater();
+        m_installerProc = nullptr;
+    }
+
+    if (m_merge) { m_merge->in.close(); m_merge->out.close(); m_merge->out.remove(); m_merge.reset(); }
+    m_extract.reset();
+
+    setBusy(false);
+    if (q) emit q->installEnded();
+}
+
+void MinecraftHandler::failJob(const QString& title, const QString& message, const QString& details, bool canRetry)
+{
+    if (!m_installing) return;
+
+    newDebug() << "[Install] FAILED:" << title << message << details.left(300);
+
+    const BuildSpec job = m_job;
+    const bool update = m_jobUpdate;
+    endJob();
+
+    if (canRetry) {
+        m_failedJobName = job.name;
+        m_retryFn = [this, job, update]() { beginInstall(job, update); };
+    } else {
+        m_failedJobName.clear();
+        m_retryFn = nullptr;
+    }
+
+    refreshSelectedState();
+    if (sc && view && !view->isActive())
+        sc->notify(QStringLiteral("Ошибка установки"), QStringLiteral("«%1»: %2").arg(job.name, title));
+    if (q) emit q->installError(title, message, details, canRetry);
+    emit installFailed(job.name, message, canRetry);
+}
+
+void MinecraftHandler::finishInstall()
+{
+    if (!m_installing) return;
+
+    const BuildSpec job = m_job;
+    const QString path = m_jobPath;
+
+    writeBuildMeta(path, job);
+    removeInstallMarker(path);
+    QDir(m_tmpDir).removeRecursively();
+
+    reportProgress(QStringLiteral("Готово"), QStringLiteral("Сборка установлена"), 1.0, true);
+    endJob();
+    m_retryFn = nullptr;
+    m_failedJobName.clear();
+
+    newDebug() << "[Install] done" << job.name;
+    refreshSelectedState();
+    if (sc && view && !view->isActive())
+        sc->notify(QStringLiteral("SeaLauncher"), QStringLiteral("Сборка «%1» установлена — можно играть!").arg(job.name));
+    emit installSucceeded(job.name);
+    emit buildsChanged();
+}
+
+void MinecraftHandler::cancelInstallation()
+{
+    if (!m_installing) return;
+    const QString name = m_job.name;
+    newDebug() << "[Install] cancelled by user:" << name;
+
+    endJob();
+    m_retryFn = nullptr;
+    m_failedJobName.clear();
+    refreshSelectedState();
+    emit installAbandoned(name);
+}
+
+void MinecraftHandler::retryLastOperation()
+{
+    if (m_installing) return;
+    const std::function<void()> fn = m_retryFn;
+    m_retryFn = nullptr;
+    m_failedJobName.clear();
+    if (fn) fn();
+}
+
+void MinecraftHandler::discardFailedOperation()
+{
+    const QString name = m_failedJobName;
+    m_retryFn = nullptr;
+    m_failedJobName.clear();
+    if (!name.isEmpty()) emit installAbandoned(name);
+}
+
+void MinecraftHandler::installLocalBuild(const QString& buildName, const QString& mcVersion,
+                                         const QString& loader, const QString& loaderVersion)
+{
+    if (m_installing) {
+        if (q) emit q->installError(QStringLiteral("Идёт другая установка"),
+                                 QStringLiteral("Дождитесь окончания установки «%1».").arg(m_job.name), QString(), false);
+        emit installFailed(buildName, QStringLiteral("Идёт другая установка"), false);
+        return;
+    }
+
+    BuildSpec spec;
+    spec.name = buildName;
+    spec.mcVersion = mcVersion;
+    spec.loader = loader;
+    spec.loaderVersion = loaderVersion;
+    spec.packVersion = QStringLiteral("0.1");
+    beginInstall(spec, false);
+}
+
+void MinecraftHandler::deleteCurrentBuild()
+{
+    if (!q || !sm || m_sel.name.isEmpty() || !isSafeBuildName(m_sel.name)) return;
+
+    if (m_installing && m_job.name == m_sel.name) {
+        emit q->installError(QStringLiteral("Сборка устанавливается"),
+                             QStringLiteral("Отмените установку или дождитесь её окончания."), QString(), false);
+        return;
+    }
+    if (m_minecraftProcess && m_minecraftProcess->state() != QProcess::NotRunning) {
+        emit q->installError(QStringLiteral("Minecraft запущен"),
+                             QStringLiteral("Закройте игру, чтобы удалить сборку."), QString(), false);
+        return;
+    }
+
+    const QString path = gamePathFor(m_sel.name);
+    QDir dir(path);
+    if (dir.exists() && !dir.removeRecursively()) {
+        emit q->installError(QStringLiteral("Не удалось удалить сборку"),
+                             QStringLiteral("Часть файлов занята другой программой. Закройте её и повторите."), path, false);
+    } else {
+        newDebug() << "[Delete] Removed:" << path;
+    }
+    refreshSelectedState();
+}
+
+void MinecraftHandler::openLauncherDir()
+{
+    if (!sm) return;
+    const QString path = sm->gameDir();
+    QDir().mkpath(path);
+    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+}
+
+void MinecraftHandler::openBuildDir()
+{
+    if (!sm || m_sel.name.isEmpty() || !isSafeBuildName(m_sel.name)) return;
+    const QString path = gamePathFor(m_sel.name);
+    if (!QDir(path).exists()) return;
+    QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+}
+
+void MinecraftHandler::ensureLauncherProfile(const QString& gameDir)
+{
+    QDir().mkpath(gameDir);
+    const QString path = gameDir + QStringLiteral("/launcher_profiles.json");
+    if (QFileInfo::exists(path)) return;
+
+    QJsonObject root;
+    root[QStringLiteral("profiles")] = QJsonObject();
+    root[QStringLiteral("selectedProfile")] = QString();
+    root[QStringLiteral("clientToken")] = QStringLiteral("8aa19a0b-733b-4153-8098-6214d930881c");
+    root[QStringLiteral("authenticationDatabase")] = QJsonObject();
+    root[QStringLiteral("launcherVersion")] = QJsonObject{{"name", "SeaLauncher"}, {"format", 21}, {"profilesFormat", 21}};
+
+    if (!writeFileAtomic(path, QJsonDocument(root).toJson(QJsonDocument::Indented)))
+        qWarning() << "[Installer] Не удалось создать launcher_profiles.json в" << path;
+}
+
+namespace {
+
+bool versionJsonUsable(const QString& path)
+{
+    const QJsonObject o = readJsonObject(path);
+    return !o.isEmpty() && o.contains(QStringLiteral("libraries"));
+}
+
+QString detectWrapperPrefix(const QList<QZipReader::FileInfo>& files)
+{
+    static const QStringList gameDirs = {
+        QStringLiteral("mods"), QStringLiteral("config"), QStringLiteral("saves"),
+        QStringLiteral("resourcepacks"), QStringLiteral("shaderpacks"), QStringLiteral("versions"),
+        QStringLiteral("libraries"), QStringLiteral("kubejs"), QStringLiteral("defaultconfigs"),
+        QStringLiteral("scripts"), QStringLiteral("assets")
+    };
+
+    QStringList paths;
+    paths.reserve(files.size());
+    for (const QZipReader::FileInfo& fi : files) paths << normZipPath(fi.filePath);
+
+    QString prefix;
+    while (true) {
+        QSet<QString> top;
+        for (const QString& p0 : paths) {
+            if (!p0.startsWith(prefix)) continue;
+            const QString p = p0.mid(prefix.length());
+            if (p.isEmpty()) continue;
+            const int slash = p.indexOf('/');
+            top.insert(slash < 0 ? p : p.left(slash));
+        }
+        if (top.size() != 1) break;
+
+        const QString candidate = *top.constBegin();
+        if (gameDirs.contains(candidate, Qt::CaseInsensitive)) break;
+
+        bool valid = true;
+        bool hasContent = false;
+        for (const QString& p0 : paths) {
+            if (!p0.startsWith(prefix)) continue;
+            const QString p = p0.mid(prefix.length());
+            if (p.isEmpty() || p == candidate) continue;
+            if (!p.startsWith(candidate + QLatin1Char('/'))) { valid = false; break; }
+            hasContent = true;
+        }
+        if (!valid || !hasContent) break;
+        prefix += candidate + QLatin1Char('/');
+    }
+    return prefix;
+}
+
+}
+
+void MinecraftHandler::runBatch(const QString& title, const QList<DownloadItem>& items, int parallel, const Cont& onOk)
+{
+    if (items.isEmpty()) { defer(m_opGen, onOk); return; }
+
+    m_batch->disconnect(this);
+    const quint64 gen = m_opGen;
+
+    connect(m_batch, &DownloadBatch::progress, this,
+            [this, gen, title](qint64 doneB, qint64 totalB, int doneF, int totalF, double speed) {
+                if (gen != m_opGen || !m_installing) return;
+                QString details;
+                double p = -1.0;
+                if (totalB > 0) {
+                    details = QStringLiteral("%1 / %2 МБ").arg(fmtMb(doneB), fmtMb(totalB));
+                    if (speed > 0) details += QStringLiteral("  (%1 МБ/с)").arg(fmtSpeed(speed));
+                    details += fmtEta(totalB - doneB, speed);
+                    if (totalF > 1) details += QStringLiteral("  •  файлов: %1 / %2").arg(doneF).arg(totalF);
+                    p = double(doneB) / double(totalB);
+                } else {
+                    details = QStringLiteral("Файлов: %1 / %2").arg(doneF).arg(totalF);
+                    p = totalF > 0 ? double(doneF) / double(totalF) : -1.0;
+                }
+                reportProgress(title, details, qBound(0.0, p, 1.0));
+            });
+
+    connect(m_batch, &DownloadBatch::finished, this, [this, gen, title, onOk](bool ok, const QString& err) {
+        if (gen != m_opGen || !m_installing) return;
+        if (!ok) {
+            failJob(title + QStringLiteral(": ошибка загрузки"),
+                    QStringLiteral("Не удалось скачать часть файлов (проблемы с сетью?). "
+                                   "Уже скачанное сохранено — нажмите «Повторить», загрузка продолжится."),
+                    err, true);
+            return;
+        }
+        defer(gen, onOk);
+    });
+
+    reportProgress(title, QStringLiteral("Проверка файлов..."), -1.0, true);
+    m_batch->start(items, parallel);
+}
+
+void MinecraftHandler::fetchText(const QString& url, int retries, bool bindToJob, FetchCb cb)
+{
+    auto c = std::make_shared<FetchCtx>();
+    c->url = url;
+    c->retries = retries;
+    c->bind = bindToJob;
+    c->gen = m_opGen;
+    c->cb = std::move(cb);
+    fetchAttempt(c);
+}
+
+void MinecraftHandler::fetchAttempt(const std::shared_ptr<FetchCtx>& c)
+{
+    if (c->bind && (c->gen != m_opGen || !m_installing)) return;
+
+    QNetworkReply* reply = m_manager->get(DownloadUtil::makeRequest(QUrl(c->url)));
+
+    auto* wd = new QTimer(reply);
+    wd->setSingleShot(true);
+    wd->setInterval(20000);
+    connect(wd, &QTimer::timeout, reply, [reply]() { reply->abort(); });
+    connect(reply, &QNetworkReply::downloadProgress, wd, [wd]() { wd->start(); });
+    wd->start();
+
+    connect(reply, &QNetworkReply::finished, this, [this, c, reply]() {
+        const int st = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool ok = reply->error() == QNetworkReply::NoError && st >= 200 && st < 300;
+        const QByteArray data = ok ? reply->readAll() : QByteArray();
+        const QString es = reply->errorString();
+        reply->deleteLater();
+
+        if (c->bind && (c->gen != m_opGen || !m_installing)) return;
+
+        if (ok) { c->cb(true, data, QString()); return; }
+
+        if (DownloadUtil::isRetryableHttp(st) && c->attempt < c->retries) {
+            c->attempt++;
+            newDebug() << "[Fetch] retry" << c->attempt << c->url << es;
+            QTimer::singleShot(DownloadUtil::backoffMs(c->attempt), this, [this, c]() { fetchAttempt(c); });
+            return;
+        }
+        c->cb(false, QByteArray(), es);
+    });
+}
+
+void MinecraftHandler::stageArchive()
+{
+    if (m_job.archiveLink.trimmed().isEmpty()) { stagePrepare(); return; }
+
+    m_partPaths.clear();
+    m_partUrls.clear();
+
+    const int parts = qMax(1, m_job.parts);
+    if (parts <= 1) {
+        m_zipPath = m_tmpDir + QStringLiteral("/modpack.zip");
+        m_partPaths << m_zipPath;
+        m_partUrls << m_job.archiveLink;
+    } else {
+        m_zipPath = m_tmpDir + QStringLiteral("/modpack.zip");
+        for (int i = 1; i <= parts; ++i) {
+            m_partPaths << QStringLiteral("%1/modpack.part%2").arg(m_tmpDir).arg(i);
+            m_partUrls  << QStringLiteral("%1/modpack.part%2").arg(m_job.archiveLink).arg(i);
+        }
+        if (QFileInfo::exists(m_zipPath)) { stagePrepare(); return; }
+    }
+
+    m_partIndex = 0;
+    downloadNextPart();
+}
+
+void MinecraftHandler::downloadNextPart()
+{
+    if (m_partIndex >= m_partUrls.size()) { mergeParts(); return; }
+
+    const int i = m_partIndex;
+    const int n = m_partUrls.size();
+    const quint64 gen = m_opGen;
+
+    m_ranged->disconnect(this);
+
+    connect(m_ranged, &RangedDownload::progress, this, [this, i, n, gen](qint64 done, qint64 total, double speed) {
+        if (gen != m_opGen || !m_installing) return;
+        QString details;
+        double p = -1.0;
+        if (total > 0) {
+            details = QStringLiteral("%1 / %2 МБ").arg(fmtMb(done), fmtMb(total));
+            if (speed > 0) details += QStringLiteral("  (%1 МБ/с)").arg(fmtSpeed(speed));
+            details += fmtEta(total - done, speed);
+            p = double(done) / double(total);
+        }
+        if (n > 1) {
+            details = QStringLiteral("Часть %1 из %2  •  ").arg(i + 1).arg(n) + details;
+            if (p >= 0) p = (double(i) + p) / double(n);
+        }
+        reportProgress(QStringLiteral("Загрузка сборки"), details, p);
+    });
+
+    connect(m_ranged, &RangedDownload::finished, this, [this, gen](bool ok, const QString& err) {
+        if (gen != m_opGen || !m_installing) return;
+        if (!ok) {
+            failJob(QStringLiteral("Ошибка загрузки сборки"),
+                    QStringLiteral("Не удалось скачать архив сборки. Уже скачанная часть сохранена — "
+                                   "нажмите «Повторить», загрузка продолжится с места обрыва."),
+                    err, true);
+            return;
+        }
+        m_partIndex++;
+        defer(gen, [this]() { downloadNextPart(); });
+    });
+
+    reportProgress(QStringLiteral("Загрузка сборки"),
+                   n > 1 ? QStringLiteral("Часть %1 из %2").arg(i + 1).arg(n) : QStringLiteral("Подключение..."),
+                   -1.0, true);
+    m_ranged->start(m_partUrls.at(i), m_partPaths.at(i), 4, 16);
+}
+
+void MinecraftHandler::mergeParts()
+{
+    if (m_partPaths.size() <= 1) { stagePrepare(); return; }
+
+    auto st = std::make_shared<MergeState>();
+    st->gen = m_opGen;
+    st->out.setFileName(m_zipPath + QStringLiteral(".merge"));
+    if (!st->out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        failJob(QStringLiteral("Ошибка склейки"), QStringLiteral("Не удалось создать файл для склейки частей."),
+                st->out.errorString(), true);
+        return;
+    }
+    for (const QString& p : m_partPaths) st->total += QFileInfo(p).size();
+
+    m_merge = st;
+    reportProgress(QStringLiteral("Склейка частей"), QStringLiteral("Начало..."), 0.0, true);
+    QTimer::singleShot(0, this, &MinecraftHandler::mergeStep);
+}
+
+void MinecraftHandler::mergeStep()
+{
+    const std::shared_ptr<MergeState> st = m_merge;
+    if (!st || !m_installing || st->gen != m_opGen) return;
+
+    QElapsedTimer t;
+    t.start();
+    while (t.elapsed() < 30) {
+        if (!st->in.isOpen()) {
+            if (st->partIdx >= m_partPaths.size()) {
+                st->out.close();
+                QFile::remove(m_zipPath);
+                if (!QFile::rename(st->out.fileName(), m_zipPath)) {
+                    failJob(QStringLiteral("Ошибка склейки"), QStringLiteral("Не удалось сохранить склеенный архив."), m_zipPath, true);
+                    return;
+                }
+                for (const QString& p : m_partPaths) {
+                    RangedDownload::removeState(p);
+                    QFile::remove(p);
+                }
+                m_merge.reset();
+                stagePrepare();
+                return;
+            }
+            st->in.setFileName(m_partPaths.at(st->partIdx));
+            if (!st->in.open(QIODevice::ReadOnly)) {
+                failJob(QStringLiteral("Ошибка склейки"), QStringLiteral("Не удалось открыть часть архива."), st->in.fileName(), true);
+                return;
+            }
+        }
+
+        const QByteArray buf = st->in.read(4 * 1024 * 1024);
+        if (buf.isEmpty()) { st->in.close(); st->partIdx++; continue; }
+
+        if (st->out.write(buf) != buf.size()) {
+            failJob(QStringLiteral("Недостаточно места на диске"),
+                    QStringLiteral("Не удалось записать склеенный архив. Освободите место и повторите."),
+                    st->out.errorString(), true);
+            return;
+        }
+        st->copied += buf.size();
+    }
+
+    reportProgress(QStringLiteral("Склейка частей"),
+                   QStringLiteral("%1 / %2 МБ").arg(fmtMb(st->copied), fmtMb(st->total)),
+                   st->total > 0 ? double(st->copied) / double(st->total) : -1.0);
+    QTimer::singleShot(0, this, &MinecraftHandler::mergeStep);
+}
+
+void MinecraftHandler::stagePrepare()
+{
+    if (m_jobUpdate) {
+        reportProgress(QStringLiteral("Подготовка обновления"), QStringLiteral("Удаление старых файлов сборки..."), -1.0, true);
+        prepareForUpdate(m_jobPath, m_jobSkipLoader);
+    }
+    defer(m_opGen, [this]() { stageLoader(); });
+}
+
+void MinecraftHandler::stageLoader()
+{
+    if (m_jobSkipLoader) {
+        newDebug() << "[Update] Loader unchanged, skipping loader install";
+        stageExtract();
+        return;
+    }
+
+    const QString& l = m_job.loader;
+    const Cont toExtract = [this]() { stageExtract(); };
+
+    if (l == QLatin1String("vanilla"))        stageVanilla(toExtract);
+    else if (l == QLatin1String("fabric"))    stageVanilla([this]() { stageFabric(); });
+    else if (l == QLatin1String("forge"))     stageVanilla([this]() { stageForge(); });
+    else if (l == QLatin1String("neoforge"))  stageNeoforge();
+    else failJob(QStringLiteral("Неизвестный загрузчик"), QStringLiteral("Загрузчик «%1» не поддерживается.").arg(l), QString(), false);
+}
+
+QList<DownloadItem> MinecraftHandler::libraryItems(const QJsonObject& json, const QString& gamePath) const
+{
+    QList<DownloadItem> out;
+    const QString libDir = gamePath + QStringLiteral("/libraries");
+
+    for (const QJsonValue& v : json.value(QStringLiteral("libraries")).toArray()) {
+        const QJsonObject lib = v.toObject();
+        if (!rulesAllow(lib.value(QStringLiteral("rules")).toArray())) continue;
+
+        DownloadItem it;
+        QString rel;
+
+        const QJsonObject art = lib.value(QStringLiteral("downloads")).toObject().value(QStringLiteral("artifact")).toObject();
+        if (!art.isEmpty()) {
+            rel = art.value(QStringLiteral("path")).toString();
+            it.url = art.value(QStringLiteral("url")).toString();
+            it.size = art.contains(QStringLiteral("size")) ? qint64(art.value(QStringLiteral("size")).toDouble()) : -1;
+            it.sha1 = art.value(QStringLiteral("sha1")).toString();
+        } else if (lib.contains(QStringLiteral("name"))) {
+            rel = mavenPathFromName(lib.value(QStringLiteral("name")).toString());
+            QString base = lib.value(QStringLiteral("url")).toString();
+            if (base.isEmpty()) base = QString::fromLatin1(kFabricMaven);
+            if (!base.endsWith('/')) base += '/';
+            if (!rel.isEmpty()) it.url = base + rel;
+            it.size = lib.contains(QStringLiteral("size")) ? qint64(lib.value(QStringLiteral("size")).toDouble()) : -1;
+            it.sha1 = lib.value(QStringLiteral("sha1")).toString();
+        }
+
+        if (rel.isEmpty() || it.url.isEmpty()) continue;
+        it.path = QDir(libDir).absoluteFilePath(rel);
+        out << it;
+    }
+    return out;
+}
+
+void MinecraftHandler::stageVanilla(const Cont& next)
+{
+    const QString mc = m_job.mcVersion;
+    const QString jsonPath = versionJsonFile(m_jobPath, mc);
+
+    if (versionJsonUsable(jsonPath)) { stageVanillaFiles(next); return; }
+    QFile::remove(jsonPath);
+
+    reportProgress(QStringLiteral("Подготовка"), QStringLiteral("Получение списка версий Minecraft..."), -1.0, true);
+    fetchText(QString::fromLatin1(kManifestUrl), 5, true,
+              [this, mc, jsonPath, next](bool ok, const QByteArray& data, const QString& err) {
+                  if (!ok) {
+                      failJob(QStringLiteral("Нет связи с серверами Mojang"),
+                              QStringLiteral("Не удалось получить список версий Minecraft. Проверьте подключение к интернету."), err, true);
+                      return;
+                  }
+
+                  QString url, sha1;
+                  for (const QJsonValue& v : QJsonDocument::fromJson(data).object().value(QStringLiteral("versions")).toArray()) {
+                      const QJsonObject ver = v.toObject();
+                      if (ver.value(QStringLiteral("id")).toString() == mc) {
+                          url = ver.value(QStringLiteral("url")).toString();
+                          sha1 = ver.value(QStringLiteral("sha1")).toString();
+                          break;
+                      }
+                  }
+                  if (url.isEmpty()) {
+                      failJob(QStringLiteral("Версия Minecraft не найдена"),
+                              QStringLiteral("Версии %1 нет в списке Mojang.").arg(mc), QString(), false);
+                      return;
+                  }
+
+                  DownloadItem it;
+                  it.url = url;
+                  it.path = jsonPath;
+                  it.sha1 = sha1;
+                  runBatch(QStringLiteral("Описание версии Minecraft"), {it}, 1, [this, next]() { stageVanillaFiles(next); });
+              });
+}
+
+void MinecraftHandler::stageVanillaFiles(const Cont& next)
+{
+    const QString mc = m_job.mcVersion;
+    const QString jsonPath = versionJsonFile(m_jobPath, mc);
+    const QJsonObject vJson = readJsonObject(jsonPath);
+    if (vJson.isEmpty()) {
+        QFile::remove(jsonPath);
+        failJob(QStringLiteral("Ошибка установки"), QStringLiteral("Описание версии Minecraft повреждено. Повторите попытку."), jsonPath, true);
+        return;
+    }
+
+    QList<DownloadItem> items;
+
+    const QJsonObject client = vJson.value(QStringLiteral("downloads")).toObject().value(QStringLiteral("client")).toObject();
+    if (!client.value(QStringLiteral("url")).toString().isEmpty()) {
+        DownloadItem jar;
+        jar.url = client.value(QStringLiteral("url")).toString();
+        jar.path = m_jobPath + QStringLiteral("/versions/") + mc + QLatin1Char('/') + mc + QStringLiteral(".jar");
+        jar.size = client.contains(QStringLiteral("size")) ? qint64(client.value(QStringLiteral("size")).toDouble()) : -1;
+        jar.sha1 = client.value(QStringLiteral("sha1")).toString();
+        items << jar;
+    }
+
+    items += libraryItems(vJson, m_jobPath);
+
+    const QJsonObject ai = vJson.value(QStringLiteral("assetIndex")).toObject();
+    if (!ai.value(QStringLiteral("url")).toString().isEmpty()) {
+        DownloadItem idx;
+        idx.url = ai.value(QStringLiteral("url")).toString();
+        idx.path = m_jobPath + QStringLiteral("/assets/indexes/") + ai.value(QStringLiteral("id")).toString(mc) + QStringLiteral(".json");
+        idx.size = ai.contains(QStringLiteral("size")) ? qint64(ai.value(QStringLiteral("size")).toDouble()) : -1;
+        idx.sha1 = ai.value(QStringLiteral("sha1")).toString();
+        items << idx;
+    }
+
+    runBatch(QStringLiteral("Загрузка Minecraft"), items, 16, [this, vJson, next]() { stageAssets(vJson, next); });
+}
+
+void MinecraftHandler::stageAssets(const QJsonObject& vJson, const Cont& next)
+{
+    const QString mc = m_job.mcVersion;
+    const QString id = vJson.value(QStringLiteral("assetIndex")).toObject().value(QStringLiteral("id")).toString(mc);
+    const QString idxPath = m_jobPath + QStringLiteral("/assets/indexes/") + id + QStringLiteral(".json");
+    const QString objectsDir = m_jobPath + QStringLiteral("/assets/objects");
+
+    const QJsonObject idx = readJsonObject(idxPath);
+    if (idx.isEmpty()) {
+        QFile::remove(idxPath);
+        failJob(QStringLiteral("Ошибка установки ресурсов"), QStringLiteral("Индекс ресурсов не скачан или повреждён."), idxPath, true);
+        return;
+    }
+
+    QList<DownloadItem> items;
+    const QJsonObject objects = idx.value(QStringLiteral("objects")).toObject();
+    items.reserve(objects.size());
+    for (auto it = objects.constBegin(); it != objects.constEnd(); ++it) {
+        const QJsonObject o = it.value().toObject();
+        const QString hash = o.value(QStringLiteral("hash")).toString();
+        if (hash.size() < 2) continue;
+        const QString sub = hash.left(2);
+
+        DownloadItem d;
+        d.url = QString::fromLatin1(kAssetsUrl) + sub + QLatin1Char('/') + hash;
+        d.path = objectsDir + QLatin1Char('/') + sub + QLatin1Char('/') + hash;
+        d.size = o.contains(QStringLiteral("size")) ? qint64(o.value(QStringLiteral("size")).toDouble()) : -1;
+        d.sha1 = hash;
+        items << d;
+    }
+
+    runBatch(QStringLiteral("Загрузка ресурсов"), items, 24, next);
+}
+
+void MinecraftHandler::stageFabric()
+{
+    const QString id = versionIdFor(m_job);
+    const QString jsonPath = versionJsonFile(m_jobPath, id);
+
+    const auto proceed = [this, jsonPath]() {
+        const QJsonObject fj = readJsonObject(jsonPath);
+        if (fj.isEmpty()) {
+            QFile::remove(jsonPath);
+            failJob(QStringLiteral("Ошибка установки Fabric"), QStringLiteral("Профиль Fabric повреждён. Повторите попытку."), jsonPath, true);
+            return;
+        }
+        runBatch(QStringLiteral("Загрузка библиотек Fabric"), libraryItems(fj, m_jobPath), 16, [this]() { stageExtract(); });
+    };
+
+    if (!readJsonObject(jsonPath).isEmpty()) { proceed(); return; }
+
+    const QString url = QStringLiteral("https://meta.fabricmc.net/v2/versions/loader/%1/%2/profile/json")
+                            .arg(m_job.mcVersion, m_job.loaderVersion);
+    reportProgress(QStringLiteral("Установка Fabric"), QStringLiteral("Получение профиля загрузчика..."), -1.0, true);
+
+    fetchText(url, 5, true, [this, jsonPath, proceed](bool ok, const QByteArray& data, const QString& err) {
+        if (!ok) {
+            failJob(QStringLiteral("Нет связи с сервером Fabric"),
+                    QStringLiteral("Не удалось получить профиль Fabric. Проверьте подключение к интернету."), err, true);
+            return;
+        }
+        const QJsonDocument doc = QJsonDocument::fromJson(data);
+        if (!doc.isObject() || !doc.object().contains(QStringLiteral("libraries"))) {
+            failJob(QStringLiteral("Ошибка установки Fabric"),
+                    QStringLiteral("Сервер Fabric вернул некорректный профиль (такой версии загрузчика может не быть)."),
+                    QString::fromUtf8(data.left(300)), false);
+            return;
+        }
+        if (!writeFileAtomic(jsonPath, data)) {
+            failJob(QStringLiteral("Ошибка записи"), QStringLiteral("Не удалось сохранить профиль Fabric."), jsonPath, false);
+            return;
+        }
+        proceed();
+    });
+}
+
+void MinecraftHandler::stageForge()
+{
+    const QString mc = m_job.mcVersion;
+    const QString fv = m_job.loaderVersion;
+
+    DownloadItem it;
+    it.url = QStringLiteral("https://maven.minecraftforge.net/net/minecraftforge/forge/%1-%2/forge-%1-%2-installer.jar").arg(mc, fv);
+    it.path = m_tmpDir + QStringLiteral("/forge-installer.jar");
+
+    const QString installer = it.path;
+    runBatch(QStringLiteral("Загрузка установщика Forge"), {it}, 1, [this, installer]() {
+        runInstaller(installer, QStringLiteral("Forge"), [this]() { stageExtract(); });
+    });
+}
+
+void MinecraftHandler::stageNeoforge()
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/downloads");
+    QDir().mkpath(dir);
+
+    const QString v = m_job.loaderVersion;
+    DownloadItem it;
+    it.path = dir + QStringLiteral("/neoforge-%1-installer.jar").arg(v);
+    it.url = QStringLiteral("https://maven.neoforged.net/releases/net/neoforged/neoforge/%1/neoforge-%1-installer.jar").arg(v);
+
+    if (QFileInfo::exists(it.path)) {
+        QZipReader z(it.path);
+        if (!z.isReadable() || z.fileInfoList().isEmpty()) {
+            z.close();
+            QFile::remove(it.path);
+        }
+    }
+
+    const QString installer = it.path;
+    runBatch(QStringLiteral("Загрузка установщика NeoForge"), {it}, 1, [this, installer]() {
+        runInstaller(installer, QStringLiteral("NeoForge"), [this]() {
+            stageVanilla([this]() { stageExtract(); });
+        });
+    });
+}
+
+void MinecraftHandler::runInstaller(const QString& installerPath, const QString& label, const Cont& onSuccess)
+{
+    const QString javaPath = sm->javaPath().trimmed();
+    if (javaPath.isEmpty() || !QFileInfo::exists(javaPath)) {
+        failJob(QStringLiteral("Java не найдена"),
+                QStringLiteral("Для установки %1 нужна Java. Укажите путь к ней в настройках лаунчера.").arg(label),
+                javaPath, false);
+        return;
+    }
+    ensureLauncherProfile(m_jobPath);
+
+    struct Ctx {
+        QString buffer;
+        QStringList tail;
+        int processorStep = 0;
+        int downloads = 0;
+        double progress = -1.0;
+    };
+    auto ctx = std::make_shared<Ctx>();
+    const quint64 gen = m_opGen;
+    const QString stageTitle = QStringLiteral("Установка %1").arg(label);
+
+    auto* proc = new QProcess(this);
+    m_installerProc = proc;
+    proc->setWorkingDirectory(m_jobPath);
+    proc->setProcessChannelMode(QProcess::MergedChannels);
+
+    connect(proc, &QProcess::readyReadStandardOutput, this, [this, proc, ctx, gen, stageTitle]() {
+        if (gen != m_opGen) { proc->readAllStandardOutput(); return; }
+
+        ctx->buffer.append(QString::fromLocal8Bit(proc->readAllStandardOutput()));
+        ctx->buffer.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+        ctx->buffer.replace('\r', '\n');
+        if (ctx->buffer.size() > 200000) ctx->buffer = ctx->buffer.right(4000);
+
+        int nl;
+        while ((nl = ctx->buffer.indexOf('\n')) >= 0) {
+            const QString line = ctx->buffer.left(nl).trimmed();
+            ctx->buffer.remove(0, nl + 1);
+            if (line.isEmpty()) continue;
+
+            ctx->tail << line;
+            while (ctx->tail.size() > 40) ctx->tail.removeFirst();
+            newDebug() << "+[Installer]" << line;
+
+            QString details = line;
+            double p = -1.0;
+
+            if (line.contains(QLatin1String("Extracting json"), Qt::CaseInsensitive)) {
+                details = QStringLiteral("Чтение профиля установки"); p = 0.08;
+            } else if (line.contains(QLatin1String("Considering minecraft"), Qt::CaseInsensitive)) {
+                details = QStringLiteral("Проверка Minecraft"); p = 0.15;
+            } else if (line.contains(QLatin1String("Downloading libraries"), Qt::CaseInsensitive)) {
+                details = QStringLiteral("Скачивание библиотек"); p = 0.25; ctx->downloads = 0;
+            } else if (line.startsWith(QLatin1String("Downloading"), Qt::CaseInsensitive) ||
+                       line.startsWith(QLatin1String("Downloaded"), Qt::CaseInsensitive)) {
+                QString f = line;
+                f.remove(QRegularExpression(QStringLiteral(R"(^Download(ing|ed):?\s*)")));
+                if (f.length() > 80) f = f.left(30) + QStringLiteral("...") + f.right(40);
+                details = f;
+                ctx->downloads++;
+                p = 0.25 + qMin(0.20, ctx->downloads * 0.005);
+            } else if (line.contains(QLatin1String("Running processor"), Qt::CaseInsensitive)) {
+                ctx->processorStep++;
+                p = 0.50 + qMin(1.0, ctx->processorStep / 8.0) * 0.40;
+                details = QStringLiteral("Ремаппинг (%1)").arg(ctx->processorStep);
+            } else if (line.contains(QLatin1String("Building processor classpath"), Qt::CaseInsensitive)) {
+                details = QStringLiteral("Финальная сборка"); p = 0.92;
+            } else if (line.contains(QLatin1String("Patching minecraft"), Qt::CaseInsensitive)) {
+                details = QStringLiteral("Патчинг Minecraft"); p = 0.95;
+            } else if (line.contains(QLatin1String("Installation complete"), Qt::CaseInsensitive) ||
+                       line.contains(QLatin1String("You can now"), Qt::CaseInsensitive) ||
+                       line.contains(QLatin1String("The installation was successful"), Qt::CaseInsensitive)) {
+                details = QStringLiteral("Готово"); p = 1.0;
+            }
+
+            if (p > ctx->progress) ctx->progress = p;
+            reportProgress(stageTitle, details, ctx->progress);
+        }
+    });
+
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, gen, javaPath](QProcess::ProcessError e) {
+        if (e != QProcess::FailedToStart) return;
+        const QString es = proc->errorString();
+        if (m_installerProc == proc) m_installerProc = nullptr;
+        proc->deleteLater();
+        if (gen != m_opGen) return;
+        failJob(QStringLiteral("Не удалось запустить установщик"),
+                QStringLiteral("Java не запустилась. Проверьте путь к Java в настройках."), javaPath + QLatin1Char('\n') + es, false);
+    });
+
+    connect(proc, &QProcess::finished, this,
+            [this, proc, ctx, gen, installerPath, label, onSuccess](int code, QProcess::ExitStatus status) {
+                if (m_installerProc == proc) m_installerProc = nullptr;
+                proc->deleteLater();
+                if (gen != m_opGen || !m_installing) return;
+
+                if (status == QProcess::NormalExit && code == 0) {
+                    newDebug() << "[Installer]" << label << "installed OK";
+                    defer(gen, onSuccess);
+                    return;
+                }
+
+                newDebug() << "[Installer]" << label << "failed, code" << code;
+
+                if (m_installerAttempt < 2) {
+                    m_installerAttempt++;
+                    reportProgress(QStringLiteral("Установка %1").arg(label),
+                                   QStringLiteral("Повторная попытка (%1/2)...").arg(m_installerAttempt), -1.0, true);
+                    QTimer::singleShot(3000, this, [this, gen, installerPath, label, onSuccess]() {
+                        if (gen != m_opGen || !m_installing) return;
+                        runInstaller(installerPath, label, onSuccess);
+                    });
+                    return;
+                }
+
+                failJob(QStringLiteral("Ошибка установки %1").arg(label),
+                        QStringLiteral("Установщик завершился с кодом %1. Чаще всего это проблема с сетью — нажмите «Повторить».").arg(code),
+                        ctx->tail.join('\n'), true);
+            });
+
+    reportProgress(QStringLiteral("Установка %1").arg(label), QStringLiteral("Запуск установщика..."), -1.0, true);
+    proc->start(javaPath, QStringList() << QStringLiteral("-jar") << installerPath
+                                        << QStringLiteral("--installClient") << m_jobPath);
+}
+
+void MinecraftHandler::discardArchive()
+{
+    if (!m_zipPath.isEmpty()) QFile::remove(m_zipPath);
+    for (const QString& p : m_partPaths) {
+        RangedDownload::removeState(p);
+        QFile::remove(p);
+    }
+}
+
+void MinecraftHandler::stageExtract()
+{
+    if (m_job.archiveLink.trimmed().isEmpty()) { finishInstall(); return; }
+    startExtract(m_zipPath, m_jobPath);
+}
+
+void MinecraftHandler::startExtract(const QString& zipPath, const QString& targetDir)
+{
+    QFile probe(zipPath);
+    if (!probe.open(QIODevice::ReadOnly)) {
+        discardArchive();
+        failJob(QStringLiteral("Ошибка распаковки"), QStringLiteral("Архив сборки не найден. Повторите загрузку."), zipPath, true);
+        return;
+    }
+    const QByteArray magic = probe.read(4);
+    probe.close();
+
+    if (!magic.startsWith("PK")) {
+        discardArchive();
+        failJob(QStringLiteral("Архив повреждён"),
+                QStringLiteral("Скачанный файл не является ZIP-архивом. Нажмите «Повторить» — он будет скачан заново."),
+                QStringLiteral("size: %1 байт").arg(QFileInfo(zipPath).size()), true);
+        return;
+    }
+
+    auto st = std::make_shared<ExtractState>();
+    st->zip.reset(new QZipReader(zipPath));
+    if (!st->zip->isReadable()) {
+        st->zip.reset();
+        discardArchive();
+        failJob(QStringLiteral("Архив повреждён"), QStringLiteral("Не удалось прочитать архив. Нажмите «Повторить» — он будет скачан заново."), zipPath, true);
+        return;
+    }
+
+    st->files = st->zip->fileInfoList();
+    if (st->files.isEmpty()) {
+        st->zip.reset();
+        discardArchive();
+        failJob(QStringLiteral("Архив пуст"), QStringLiteral("В архиве сборки нет файлов."), zipPath, true);
+        return;
+    }
+
+    st->prefix = detectWrapperPrefix(st->files);
+    st->targetDir = targetDir;
+    st->targetClean = QDir::cleanPath(QDir(targetDir).absolutePath());
+    st->gen = m_opGen;
+    if (!st->prefix.isEmpty()) newDebug() << "[Zip] Stripping wrapper:" << st->prefix;
+
+    m_extract = st;
+    reportProgress(QStringLiteral("Распаковка сборки"), QStringLiteral("Подготовка..."), 0.0, true);
+    QTimer::singleShot(0, this, &MinecraftHandler::extractStep);
+}
+
+void MinecraftHandler::extractStep()
+{
+    const std::shared_ptr<ExtractState> st = m_extract;
+    if (!st || !m_installing || st->gen != m_opGen) return;
+
+    const int total = st->files.size();
+    QElapsedTimer t;
+    t.start();
+
+    while (st->index < total && t.elapsed() < 30) {
+        const QZipReader::FileInfo& fi = st->files.at(st->index++);
+
+        QString rel = normZipPath(fi.filePath);
+        if (rel.isEmpty()) continue;
+        if (!st->prefix.isEmpty()) {
+            if (!rel.startsWith(st->prefix)) continue;
+            rel = rel.mid(st->prefix.length());
+        }
+        if (rel.isEmpty()) continue;
+
+        const QString outPath = QDir::cleanPath(QDir(st->targetDir).absoluteFilePath(rel));
+        if (!outPath.startsWith(st->targetClean + QLatin1Char('/'))) {
+            newDebug() << "[Zip] Skipping unsafe path:" << fi.filePath;
+            continue;
+        }
+
+        if (fi.isDir) {
+            if (!QDir().mkpath(outPath)) {
+                st->failed++;
+                if (st->firstError.isEmpty()) st->firstError = QStringLiteral("Не удалось создать папку ") + outPath;
+            }
+            continue;
+        }
+
+        QDir().mkpath(QFileInfo(outPath).absolutePath());
+        const QByteArray data = st->zip->fileData(fi.filePath);
+        if (data.isEmpty() && fi.size > 0) {
+            st->failed++;
+            if (st->firstError.isEmpty()) st->firstError = QStringLiteral("Не удалось прочитать из архива: ") + fi.filePath;
+            continue;
+        }
+
+        QFile out(outPath);
+        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate) || out.write(data) != data.size()) {
+            st->failed++;
+            if (st->firstError.isEmpty())
+                st->firstError = QStringLiteral("Не удалось записать ") + outPath + QStringLiteral(" (") + out.errorString() + QLatin1Char(')');
+            st->index = total;
+            break;
+        }
+        out.close();
+        st->written++;
+    }
+
+    reportProgress(QStringLiteral("Распаковка сборки"), QStringLiteral("%1 / %2").arg(st->index).arg(total),
+                   total > 0 ? double(st->index) / double(total) : 1.0);
+
+    if (st->index < total) {
+        QTimer::singleShot(0, this, &MinecraftHandler::extractStep);
+        return;
+    }
+
+    st->zip.reset();
+    m_extract.reset();
+    newDebug() << "[Zip] Done. written:" << st->written << "failed:" << st->failed;
+
+    if (st->written == 0 || st->failed > 0) {
+        discardArchive();
+        failJob(QStringLiteral("Ошибка распаковки"),
+                st->firstError.isEmpty() ? QStringLiteral("Не удалось распаковать сборку. Проверьте свободное место на диске.")
+                                         : st->firstError,
+                QString(), true);
+        return;
+    }
+    finishInstall();
+}
+
+void MinecraftHandler::mainButtonClick()
+{
+    newDebug() << "DEBUG: Handling main button click";
+    if (!sm || !q) return;
+
+    if (m_minecraftProcess && m_minecraftProcess->state() != QProcess::NotRunning) {
+        newDebug() << "[MC] Minecraft already running";
+        return;
+    }
+    if (m_sel.name.isEmpty()) return;
+
+    if (!isSafeBuildName(m_sel.name)) {
+        emit q->installError(QStringLiteral("Некорректное имя сборки"),
+                             QStringLiteral("Имя «%1» нельзя использовать как имя папки.").arg(m_sel.name), QString(), false);
+        return;
+    }
+
+    if (m_installing) {
+        if (m_job.name != m_sel.name)
+            emit q->installError(QStringLiteral("Идёт установка"),
+                                 QStringLiteral("Сейчас устанавливается «%1». Дождитесь завершения или отмените её.").arg(m_job.name),
+                                 QString(), false);
+        return;
+    }
+
+    refreshSelectedState();
+
+    if (!m_buildExists || m_updateAvailable) {
+        beginInstall(m_sel, m_buildExists && m_updateAvailable);
+        return;
+    }
+
+    const QString gamePath = gamePathFor(m_sel.name);
+    const QStringList command = parseVersionJson(gamePath);
+    if (command.isEmpty()) return;
+
+    newDebug() << "DEBUG: Starting minecraft on" << m_sel.loader << m_sel.loaderVersion;
+    launchMinecraft(command, gamePath);
+}
+
+QByteArray MinecraftHandler::loadCache(const QString& fileName) const
+{
+    QFile f(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QLatin1Char('/') + fileName);
+    if (!f.open(QIODevice::ReadOnly)) return QByteArray();
+    return f.readAll();
+}
+
+void MinecraftHandler::saveCache(const QString& fileName, const QByteArray& data) const
+{
+    writeFileAtomic(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QLatin1Char('/') + fileName, data);
+}
+
+void MinecraftHandler::scheduleFetchRetry()
+{
+    if (m_fetchRetryTimer && !m_fetchRetryTimer->isActive())
+        m_fetchRetryTimer->start();
+}
+
+void MinecraftHandler::fetchBuildsList()
+{
+    if (m_fetchingBuilds) return;
+    m_fetchingBuilds = true;
+
+    fetchText(QString::fromLatin1(kBuildsUrl), 3, false, [this](bool ok, const QByteArray& data, const QString& err) {
+        m_fetchingBuilds = false;
+
+        const QJsonDocument doc = ok ? QJsonDocument::fromJson(data) : QJsonDocument();
+        if (ok && doc.isArray()) {
+            saveCache(QStringLiteral("builds_cache.json"), data);
+            setOffline(false);
+            emit buildsListReady(doc.array());
+            return;
+        }
+
+        setOffline(true);
+        scheduleFetchRetry();
+
+        const QJsonDocument cached = QJsonDocument::fromJson(loadCache(QStringLiteral("builds_cache.json")));
+        if (cached.isArray()) {
+            newDebug() << "[FetchBuilds] offline, using cache";
+            emit buildsListReady(cached.array());
+            return;
+        }
+
+        if (!q) return;
+        m_failedJobName.clear();
+        m_retryFn = [this]() { fetchBuildsList(); };
+        emit q->installError(QStringLiteral("Не удалось получить список сборок"),
+                             ok ? QStringLiteral("Сервер вернул данные в неожиданном формате.")
+                                : QStringLiteral("Проверьте подключение к интернету. Лаунчер сам повторит попытку."),
+                             err, true);
+    });
+}
+
+void MinecraftHandler::fetchNews()
+{
+    if (m_fetchingNews) return;
+    m_fetchingNews = true;
+
+    fetchText(QString::fromLatin1(kNewsUrl), 3, false, [this](bool ok, const QByteArray& data, const QString&) {
+        m_fetchingNews = false;
+
+        QJsonDocument doc = ok ? QJsonDocument::fromJson(data) : QJsonDocument();
+        if (ok && doc.isArray()) {
+            saveCache(QStringLiteral("news_cache.json"), data);
+        } else {
+            doc = QJsonDocument::fromJson(loadCache(QStringLiteral("news_cache.json")));
+            if (!doc.isArray()) return;
+        }
+
+        const QJsonArray arr = doc.array();
+        QJsonArray limited;
+        for (int i = 0; i < arr.size() && i < 8; ++i) limited.append(arr.at(i));
+        emit newsReady(limited);
+    });
+}
+
+QStringList MinecraftHandler::parseVersionJson(const QString& gamePath)
+{
+    const QString versionId = getVersionId();
+    const QString jsonPath = versionJsonFile(gamePath, versionId);
+
+    const QJsonObject json = readJsonObject(jsonPath);
+    if (json.isEmpty()) {
+        newDebug() << "[MC] ERROR: cannot read" << jsonPath;
+        emit q->installError(QStringLiteral("Ошибка"), QStringLiteral("Файл версии не найден или повреждён. Переустановите сборку."), jsonPath, false);
+        return {};
+    }
+
+    QList<QJsonObject> chain;
+    chain << json;
+    int requiredJava = json.value(QStringLiteral("javaVersion")).toObject().value(QStringLiteral("majorVersion")).toInt(0);
+    {
+        QJsonObject cur = json;
+        int guard = 0;
+        while (cur.contains(QStringLiteral("inheritsFrom")) && guard++ < 8) {
+            const QString parent = cur.value(QStringLiteral("inheritsFrom")).toString();
+            const QJsonObject pj = readJsonObject(versionJsonFile(gamePath, parent));
+            if (pj.isEmpty()) { newDebug() << "[MC] ERROR: cannot open parent json" << parent; break; }
+            requiredJava = qMax(requiredJava, pj.value(QStringLiteral("javaVersion")).toObject().value(QStringLiteral("majorVersion")).toInt(0));
+            chain.prepend(pj);
+            cur = pj;
+        }
+    }
+
+    if (requiredJava > 0) {
+        QString suited;
+        const QString userJava = sm->javaPath();
+        if (!userJava.isEmpty() && sm->getJavaMajorVersion(userJava) == requiredJava)
+            suited = userJava;
+        else
+            suited = sm->findJavaByMajor(requiredJava);
+
+        const int suitedMajor = suited.isEmpty() ? -1 : sm->getJavaMajorVersion(suited);
+        if (suited.isEmpty() || suitedMajor < requiredJava) {
+            emit q->installError(QStringLiteral("Несовместимая версия Java"),
+                                 QStringLiteral("Для Minecraft %1 требуется Java %2, %3.\nУстановите JDK %2 и повторите.")
+                                     .arg(m_sel.mcVersion).arg(requiredJava)
+                                     .arg(suited.isEmpty() ? QStringLiteral("но в системе её нет")
+                                                           : QStringLiteral("а найдена только Java %1").arg(suitedMajor)),
+                                 QString(), false);
+            return {};
+        }
+        m_launchJavaPath = suited;
+        newDebug() << "[MC] Required Java:" << requiredJava << "using Java" << suitedMajor << "at" << suited;
+    } else {
+        m_launchJavaPath = sm->javaPath();
+    }
+    int javaMajor = sm->getJavaMajorVersion(m_launchJavaPath);
+    if (javaMajor <= 0) javaMajor = 21;
+
+    const QString librariesDir = gamePath + QStringLiteral("/libraries");
+    QStringList classpathList;
+    QSet<QString> seen;
+    auto addCp = [&](const QString& p) {
+        const QString nat = QDir::toNativeSeparators(QDir::cleanPath(p));
+        if (seen.contains(nat)) return;
+        seen.insert(nat);
+        classpathList << nat;
+    };
+
+    for (const QJsonObject& j : chain) {
+        for (const QJsonValue& v : j.value(QStringLiteral("libraries")).toArray()) {
+            const QJsonObject lib = v.toObject();
+            if (!rulesAllow(lib.value(QStringLiteral("rules")).toArray())) continue;
+
+            QString rel;
+            const QJsonObject art = lib.value(QStringLiteral("downloads")).toObject().value(QStringLiteral("artifact")).toObject();
+            if (!art.isEmpty()) rel = art.value(QStringLiteral("path")).toString();
+            else if (lib.contains(QStringLiteral("name"))) rel = mavenPathFromName(lib.value(QStringLiteral("name")).toString());
+            if (rel.isEmpty()) continue;
+            addCp(QDir(librariesDir).absoluteFilePath(rel));
+        }
+    }
+
+    const bool usesBSL = (m_sel.loader == QLatin1String("forge") || m_sel.loader == QLatin1String("neoforge"));
+
+    if (m_sel.loader == QLatin1String("vanilla") || m_sel.loader == QLatin1String("fabric")) {
+        const QString baseVersion = json.contains(QStringLiteral("inheritsFrom"))
+        ? json.value(QStringLiteral("inheritsFrom")).toString() : m_sel.mcVersion;
+        const QString mcJar = gamePath + QStringLiteral("/versions/") + baseVersion + QLatin1Char('/') + baseVersion + QStringLiteral(".jar");
+        if (QFile::exists(mcJar)) addCp(mcJar);
+        else newDebug() << "[MC] WARNING: vanilla jar missing:" << mcJar;
+    }
+
+    const QString classPath = classpathList.join(';');
+
+    if (usesBSL) {
+        QFile cpFile(gamePath + QStringLiteral("/legacyClassPath.txt"));
+        if (cpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            for (const QString& entry : classpathList) { cpFile.write(entry.toUtf8()); cpFile.write("\n"); }
+        }
+    }
+
+    QString assetIndexId = m_sel.mcVersion;
+    for (int i = chain.size() - 1; i >= 0; --i) {
+        const QString id = chain.at(i).value(QStringLiteral("assetIndex")).toObject().value(QStringLiteral("id")).toString();
+        if (!id.isEmpty()) { assetIndexId = id; break; }
+    }
+    {
+        const QString idxDir = gamePath + QStringLiteral("/assets/indexes/");
+        if (!QFile::exists(idxDir + assetIndexId + QStringLiteral(".json")) &&
+            QFile::exists(idxDir + m_sel.mcVersion + QStringLiteral(".json")))
+            QFile::copy(idxDir + m_sel.mcVersion + QStringLiteral(".json"), idxDir + assetIndexId + QStringLiteral(".json"));
+    }
+
+    QHash<QString, QString> vars;
+    vars[QStringLiteral("${auth_player_name}")] = sm->username();
+    vars[QStringLiteral("${auth_uuid}")] = QStringLiteral("00000000-0000-0000-0000-000000000000");
+    vars[QStringLiteral("${auth_access_token}")] = QStringLiteral("0");
+    vars[QStringLiteral("${auth_session}")] = QStringLiteral("0");
+    vars[QStringLiteral("${user_type}")] = QStringLiteral("legacy");
+    vars[QStringLiteral("${version_name}")] = versionId;
+    vars[QStringLiteral("${version_type}")] = QStringLiteral("release");
+    vars[QStringLiteral("${game_directory}")] = gamePath;
+    vars[QStringLiteral("${assets_root}")] = gamePath + QStringLiteral("/assets");
+    vars[QStringLiteral("${assets_index_name}")] = assetIndexId;
+    vars[QStringLiteral("${natives_directory}")] = gamePath + QStringLiteral("/natives");
+    vars[QStringLiteral("${library_directory}")] = librariesDir;
+    vars[QStringLiteral("${classpath}")] = classPath;
+    vars[QStringLiteral("${launcher_name}")] = QStringLiteral("SeaLauncher");
+    vars[QStringLiteral("${launcher_version}")] = QStringLiteral("1.0");
+    vars[QStringLiteral("${resolution_width}")] = QStringLiteral("925");
+    vars[QStringLiteral("${resolution_height}")] = QStringLiteral("530");
+    vars[QStringLiteral("${game_assets}")] = gamePath + QStringLiteral("/assets");
+    vars[QStringLiteral("${user_properties}")] = QStringLiteral("{}");
+    vars[QStringLiteral("${clientid}")] = QStringLiteral("0");
+    vars[QStringLiteral("${auth_xuid}")] = QStringLiteral("0");
+    vars[QStringLiteral("${classpath_separator}")] = QStringLiteral(";");
+    vars[QStringLiteral("${path_separator}")] = QStringLiteral(";");
+    if (usesBSL) {
+        vars[QStringLiteral("${fml.neoForgeVersion}")] = m_sel.loaderVersion;
+        vars[QStringLiteral("${fml.mcVersion}")] = m_sel.mcVersion;
+        vars[QStringLiteral("${fml.fmlVersion}")] = QString();
+    }
+    if (m_sel.loader == QLatin1String("fabric"))
+        vars[QStringLiteral("${fabric.gameJarPath}")] = gamePath + QStringLiteral("/versions/") + m_sel.mcVersion + QLatin1Char('/') + m_sel.mcVersion + QStringLiteral(".jar");
+
+    auto substitute = [&vars](QString s) -> QString {
+        for (auto it = vars.constBegin(); it != vars.constEnd(); ++it) s.replace(it.key(), it.value());
+        return s;
+    };
+    auto expandArray = [&substitute](const QJsonArray& arr) -> QStringList {
+        QStringList out;
+        for (const QJsonValue& v : arr) {
+            if (v.isString()) { out << substitute(v.toString()); continue; }
+            if (!v.isObject()) continue;
+            const QJsonObject obj = v.toObject();
+            if (!rulesAllow(obj.value(QStringLiteral("rules")).toArray())) continue;
+            const QJsonValue val = obj.value(QStringLiteral("value"));
+            if (val.isString()) out << substitute(val.toString());
+            else if (val.isArray())
+                for (const QJsonValue& sub : val.toArray())
+                    if (sub.isString()) out << substitute(sub.toString());
+        }
+        return out;
+    };
+
+    QStringList jvmArgs;
+    jvmArgs << QStringLiteral("-Xmx") + QString::number(sm->ramMb()) + QLatin1Char('M');
+    jvmArgs << QStringLiteral("-Djava.library.path=") + gamePath + QStringLiteral("/natives");
+    if (usesBSL) jvmArgs << QStringLiteral("-DlegacyClassPath=") + classPath;
+    else jvmArgs << QStringLiteral("-cp") << classPath;
+    if (!sm->jvmArgs().trimmed().isEmpty()) jvmArgs << sm->jvmArgs().split(' ', Qt::SkipEmptyParts);
+
+    for (const QJsonObject& jObj : chain) {
+        const QJsonObject args = jObj.value(QStringLiteral("arguments")).toObject();
+        if (!args.contains(QStringLiteral("jvm"))) continue;
+        for (const QString& arg : expandArray(args.value(QStringLiteral("jvm")).toArray())) {
+            if (!isJvmArgSupportedFor(arg, javaMajor)) { newDebug() << "[MC] Skipping JVM arg (Java" << javaMajor << "):" << arg; continue; }
+            jvmArgs << arg;
+        }
+    }
+
+    QStringList gameArgs;
+    bool foundGameArgs = false;
+    for (const QJsonObject& jObj : chain) {
+        if (jObj.contains(QStringLiteral("minecraftArguments"))) {
+            gameArgs << substitute(jObj.value(QStringLiteral("minecraftArguments")).toString()).split(' ', Qt::SkipEmptyParts);
+            foundGameArgs = true;
+            continue;
+        }
+        const QJsonObject args = jObj.value(QStringLiteral("arguments")).toObject();
+        if (args.contains(QStringLiteral("game"))) {
+            gameArgs << expandArray(args.value(QStringLiteral("game")).toArray());
+            foundGameArgs = true;
+        }
+    }
+    if (!foundGameArgs) {
+        gameArgs << QStringLiteral("--username") << sm->username() << QStringLiteral("--version") << versionId
+                 << QStringLiteral("--gameDir") << gamePath << QStringLiteral("--assetsDir") << gamePath + QStringLiteral("/assets")
+                 << QStringLiteral("--assetIndex") << assetIndexId << QStringLiteral("--uuid") << QStringLiteral("00000000-0000-0000-0000-000000000000")
+                 << QStringLiteral("--accessToken") << QStringLiteral("0") << QStringLiteral("--userType") << QStringLiteral("legacy");
+    }
+
+    QStringList filtered;
+    for (int i = 0; i < gameArgs.size(); ++i) {
+        const QString& a = gameArgs.at(i);
+        if (a == QLatin1String("--demo")) continue;
+        if (a.startsWith(QLatin1String("--quickPlay"))) {
+            if (i + 1 < gameArgs.size() && !gameArgs.at(i + 1).startsWith(QLatin1String("--"))) ++i;
+            continue;
+        }
+        filtered << a;
+    }
+    gameArgs = filtered;
+
+    QString defaultMain = QStringLiteral("net.minecraft.client.main.Main");
+    if (usesBSL) defaultMain = QStringLiteral("cpw.mods.bootstraplauncher.BootstrapLauncher");
+    else if (m_sel.loader == QLatin1String("fabric")) defaultMain = QStringLiteral("net.fabricmc.loader.impl.launch.knot.KnotClient");
+    const QString mainClass = json.value(QStringLiteral("mainClass")).toString(defaultMain);
+
+    QStringList fullCommand;
+    fullCommand << jvmArgs << mainClass << gameArgs;
+
+    newDebug() << "[MC] loader:" << m_sel.loader << "versionId:" << versionId
+               << "classpath:" << classpathList.size() << "mainClass:" << mainClass;
+    return fullCommand;
+}
+
+bool MinecraftHandler::isJvmArgSupportedFor(const QString& arg, int javaMajor)
+{
+    struct Rule { const char* prefix; int minJava; };
+    static const Rule rules[] = {
+                                  { "--sun-misc-unsafe-memory-access", 23 },
+                                  { "--enable-preview", 11 },
+                                  { "-XX:+UseShenandoahGC", 12 },
+                                  { "-XX:+UseZGC", 11 },
+                                  { "-XX:+ZGenerational", 21 },
+                                  { "-XX:+UseCompactObjectHeaders", 24 },
+                                  { "--add-opens", 9 }, { "--add-exports", 9 }, { "--add-modules", 9 },
+                                  { "--module-path", 9 }, { "-p", 9 },
+                                  };
+    for (const auto& r : rules)
+        if (arg.startsWith(QLatin1String(r.prefix)) && javaMajor < r.minJava) return false;
+    return true;
+}
+
+bool MinecraftHandler::launchMinecraft(const QStringList& command, const QString& gamePath)
+{
+    if (m_minecraftProcess && m_minecraftProcess->state() != QProcess::NotRunning) {
+        newDebug() << "[MC] Minecraft already running, refusing to start another";
+        return false;
+    }
+    if (command.isEmpty()) {
+        emit q->installError(QStringLiteral("Ошибка"), QStringLiteral("Команда запуска пуста"), QString(), false);
+        return false;
+    }
+
+    const QString javaPath = QDir::toNativeSeparators((m_launchJavaPath.isEmpty() ? sm->javaPath() : m_launchJavaPath).trimmed());
+    if (javaPath.isEmpty() || !QFileInfo::exists(javaPath)) {
+        emit q->installError(QStringLiteral("Java не найдена"),
+                             QStringLiteral("Укажите путь к Java в настройках лаунчера."), javaPath, false);
+        return false;
+    }
+
+    QByteArray buf;
+    for (const QString& arg : command) {
+        QString e = arg;
+        e.replace('\\', QStringLiteral("\\\\"));
+        e.replace('"', QStringLiteral("\\\""));
+        buf += '"' + e.toUtf8() + "\"\n";
+    }
+    const QString argsFilePath = gamePath + QStringLiteral("/launch_args.txt");
+    if (!writeFileAtomic(argsFilePath, buf)) {
+        emit q->installError(QStringLiteral("Ошибка"), QStringLiteral("Не удалось записать файл аргументов запуска."), argsFilePath, false);
+        return false;
+    }
+
+    auto* proc = new QProcess(this);
+    m_minecraftProcess = proc;
+    proc->setWorkingDirectory(gamePath);
+    proc->setProcessChannelMode(QProcess::MergedChannels);
+
+    auto tail = std::make_shared<QStringList>();
+    auto lineBuf = std::make_shared<QString>();
+
+    connect(proc, &QProcess::readyReadStandardOutput, this, [proc, tail, lineBuf]() {
+        lineBuf->append(QString::fromLocal8Bit(proc->readAllStandardOutput()));
+        int nl;
+        while ((nl = lineBuf->indexOf('\n')) >= 0) {
+            const QString line = lineBuf->left(nl).trimmed();
+            lineBuf->remove(0, nl + 1);
+            if (line.isEmpty()) continue;
+            *tail << line;
+            while (tail->size() > 60) tail->removeFirst();
+            newDebug() << "[Minecraft]" << line;
+        }
+        if (lineBuf->size() > 100000) lineBuf->clear();
+    });
+
+    connect(proc, &QProcess::started, this, [this]() { emit minecraftStarted(); });
+
+    connect(proc, &QProcess::errorOccurred, this, [this, proc](QProcess::ProcessError e) {
+        if (e != QProcess::FailedToStart) return;
+        const QString es = proc->errorString();
+        if (m_minecraftProcess == proc) m_minecraftProcess = nullptr;
+        proc->deleteLater();
+        emit q->installError(QStringLiteral("Minecraft не запустился"), es, QString(), false);
+    });
+
+    connect(proc, &QProcess::finished, this, [this, proc, tail](int exitCode, QProcess::ExitStatus status) {
+        const bool bad = (status != QProcess::NormalExit || exitCode != 0);
+        newDebug() << "[Minecraft] finished, exitCode:" << exitCode;
+        if (m_minecraftProcess == proc) m_minecraftProcess = nullptr;
+        proc->deleteLater();
+
+        emit minecraftStopped();
+
+        if (bad && q)
+            emit q->installError(QStringLiteral("Minecraft завершился с ошибкой"),
+                                 QStringLiteral("Код выхода: %1. Последние строки журнала приведены в «Подробностях».").arg(exitCode),
+                                 tail->join('\n'), false);
+    });
+
+    newDebug() << "[MC] Starting:" << javaPath << "argfile:" << argsFilePath << "cwd:" << gamePath;
+    proc->start(javaPath, QStringList() << QStringLiteral("@") + QDir::toNativeSeparators(argsFilePath));
+    return true;
 }

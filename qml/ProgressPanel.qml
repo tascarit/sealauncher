@@ -16,11 +16,12 @@ Item {
     property real progress: 0.0
     property bool indeterminate: false
     property bool cancellable: true
+    property bool cancelling: false
 
     signal cancelled()
 
     function open()  { opacity = 1.0 }
-    function close() { opacity = 0.0 }
+    function close() { opacity = 0.0; cancelling = false }
 
     Behavior on opacity { NumberAnimation { duration: 200 } }
 
@@ -155,6 +156,12 @@ Item {
                 }
 
                 Item { Layout.fillWidth: true }
+
+                Text {
+                    text: "При обрыве связи загрузка продолжится сама"
+                    color: Qt.rgba(1, 1, 1, 0.28)
+                    font.pixelSize: 10
+                }
             }
 
             Item { Layout.fillHeight: true }
@@ -167,10 +174,11 @@ Item {
                 hoverEnabled: true
                 flat: true
                 padding: 0
-                visible: false
+                visible: root.cancellable
+                enabled: !root.cancelling
 
                 contentItem: Text {
-                    text: "Отмена"
+                    text: root.cancelling ? "Отмена..." : "Отмена"
                     color: cancelBtn.hovered ? "#FFFFFF" : Qt.rgba(1, 1, 1, 0.7)
                     font.pixelSize: 13
                     horizontalAlignment: Text.AlignHCenter
@@ -188,7 +196,7 @@ Item {
                     Behavior on color { ColorAnimation { duration: 120 } }
                 }
 
-                onClicked: root.cancelled()
+                onClicked: { root.cancelling = true; root.cancelled() }
             }
         }
     }

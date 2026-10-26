@@ -12,7 +12,10 @@ public:
 
 signals:
     void installProgress(const QString& stage, const QString& details, double progress);
+
     void installError(const QString& title, const QString& message, const QString& details, bool canRetry);
+
+    void installEnded();
 };
 
-#endif // QMLHANDLER_H
+#endif

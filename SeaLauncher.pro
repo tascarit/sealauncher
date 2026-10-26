@@ -1,4 +1,5 @@
-QT += widgets quick multimedia quickcontrols2 quicklayouts quickwidgets core5compat
+QT += widgets quick multimedia quickcontrols2 quicklayouts quickwidgets core5compat network
+QT += gui-private core-private
 
 CONFIG += c++17
 
@@ -12,6 +13,7 @@ QMAKE_LFLAGS += -fstack-protector-all
 SOURCES += \
     NewDebug.cpp \
     SettingsManager.cpp \
+    downloadmanager.cpp \
     localbuildsmanager.cpp \
     main.cpp \
     minecrafthandler.cpp \
@@ -24,6 +26,7 @@ HEADERS += \
     QmlHandler.h \
     SettingsController.h \
     SettingsManager.h \
+    downloadmanager.h \
     localbuildsmanager.h \
     minecrafthandler.h \
     moddependencyresolver.h \
@@ -40,7 +43,7 @@ DISTFILES += \
     qml/BuildCreatorDialog.qml \
     qml/ErrorDialog.qml \
     qml/ProgressPanel.qml \
-    qml/Main.qml \
+    qml/Main.qml
 
 RESOURCES += \
     resources.qrc

@@ -5,16 +5,22 @@
 #include <QJsonValue>
 #include <QDebug>
 
-static QString jsonValueToString(const QJsonValue& value, int indent)
+inline QString jsonValueToString(const QJsonValue& value, int indent)
 {
     const QString pad = QString(indent * 2, ' ');
     const QString padInner = QString((indent + 1) * 2, ' ');
+
+    auto quoted = [](const QString& s) {
+        QString e = s;
+        e.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+        return "\"" + e + "\"";
+    };
 
     switch (value.type()) {
     case QJsonValue::Null:   return "null";
     case QJsonValue::Bool:   return value.toBool() ? "true" : "false";
     case QJsonValue::Double: return QString::number(value.toDouble());
-    case QJsonValue::String: return "\"" + value.toString() + "\"";
+    case QJsonValue::String: return quoted(value.toString());
 
     case QJsonValue::Array: {
         const QJsonArray arr = value.toArray();
@@ -35,8 +41,7 @@ static QString jsonValueToString(const QJsonValue& value, int indent)
         QString s = "{\n";
         int i = 0;
         for (auto it = obj.begin(); it != obj.end(); ++it, ++i) {
-            s += padInner + "\"" + it.key() + "\": "
-               + jsonValueToString(it.value(), indent + 1);
+            s += padInner + quoted(it.key()) + ": " + jsonValueToString(it.value(), indent + 1);
             if (i < obj.size() - 1) s += ",";
             s += "\n";
         }

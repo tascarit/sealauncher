@@ -15,6 +15,9 @@ Item {
     property string details: ""
     property bool detailsExpanded: false
     property bool canRetry: false
+    property string actionText: "Повторить"
+    property string closeText: "Закрыть"
+    property string pendingAction: ""
 
     signal closed()
     signal retried()
@@ -24,6 +27,21 @@ Item {
         message = m
         details = d || ""
         canRetry = retry || false
+        actionText = "Повторить"
+        closeText = "Закрыть"
+        pendingAction = ""
+        detailsExpanded = false
+        opacity = 1.0
+    }
+
+    function confirm(t, m, actionLabel, action) {
+        title = t
+        message = m
+        details = ""
+        canRetry = true
+        actionText = actionLabel
+        closeText = "Отмена"
+        pendingAction = action
         detailsExpanded = false
         opacity = 1.0
     }
@@ -103,6 +121,8 @@ Item {
                 wrapMode: Text.WordWrap
             }
 
+            TextEdit { id: clipboardHelper; visible: false; text: root.details }
+
             Button {
                 id: detailsBtn
                 visible: root.details.length > 0
@@ -131,6 +151,33 @@ Item {
 
                 background: Rectangle { color: "transparent" }
                 onClicked: root.detailsExpanded = !root.detailsExpanded
+            }
+
+            Button {
+                id: copyBtn
+                visible: root.detailsExpanded && root.details.length > 0
+                Layout.preferredHeight: 24
+                Layout.preferredWidth: 150
+                hoverEnabled: true
+                flat: true
+                padding: 0
+                property bool copied: false
+
+                contentItem: Text {
+                    text: copyBtn.copied ? "Скопировано ✓" : "Копировать подробности"
+                    color: copyBtn.hovered ? "#FFF0B5" : Qt.rgba(1, 1, 1, 0.5)
+                    font.pixelSize: 11
+                    horizontalAlignment: Text.AlignLeft
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle { color: "transparent" }
+                onClicked: {
+                    clipboardHelper.selectAll()
+                    clipboardHelper.copy()
+                    copied = true
+                    copyReset.restart()
+                }
+                Timer { id: copyReset; interval: 1800; onTriggered: copyBtn.copied = false }
             }
 
             Rectangle {
@@ -185,7 +232,7 @@ Item {
                     padding: 0
 
                     contentItem: Text {
-                        text: "Закрыть"
+                        text: root.closeText
                         color: closeBtn.hovered ? "#FFFFFF" : Qt.rgba(1, 1, 1, 0.7)
                         font.pixelSize: 13
                         horizontalAlignment: Text.AlignHCenter
@@ -216,7 +263,7 @@ Item {
                     padding: 0
 
                     contentItem: Text {
-                        text: "Повторить"
+                        text: root.actionText
                         color: "#575757"
                         font.pixelSize: 13
                         font.weight: Font.Medium

@@ -29,6 +29,15 @@ Item {
         smooth: true
     }
 
+    Connections {
+        target: Window.window
+        function onVisibilityChanged() {
+            const v = Window.window ? Window.window.visibility : Window.Windowed
+            if (v === Window.Hidden || v === Window.Minimized) backgroundVideo.pause()
+            else backgroundVideo.play()
+        }
+    }
+
     Rectangle {
         id: titleBar
         anchors.top: parent.top
@@ -344,7 +353,7 @@ Item {
                         border.width: 1
                     }
 
-                    onClicked: buildCreatorDialog.open()
+                    onClicked: buildCreatorDialog.openNew()
                 }
 
                 Button {
@@ -602,9 +611,13 @@ Item {
                     flat: true
                     padding: 0
 
-                    readonly property string caption: minecraftHandler.installation ? "УСТАНОВКА" : (minecraftHandler.updateAvailable ? "ОБНОВИТЬ"
-                                                : (minecraftHandler.buildExists ? "ИГРАТЬ" : "СКАЧАТЬ"))
+                    readonly property string caption: minecraftHandler.installation ? "УСТАНОВКА..."
+                        : (minecraftHandler.updateAvailable ? "ОБНОВИТЬ"
+                        : (minecraftHandler.buildExists ? "ИГРАТЬ"
+                        : (minecraftHandler.canDelete ? "ДОКАЧАТЬ" : "СКАЧАТЬ")))
                     readonly property bool isUpdate: minecraftHandler.updateAvailable
+                    enabled: !minecraftHandler.installation
+                    opacity: enabled ? 1.0 : 0.65
 
                     contentItem: Item {
                         anchors.fill: parent
@@ -671,7 +684,7 @@ Item {
                     hoverEnabled: true
                     flat: true
                     padding: 0
-                    visible: minecraftHandler.buildExists && buildListView.currentIndex >= 0 && buildModel.get(buildListView.currentIndex).category === "local"
+                    visible: minecraftHandler.buildExists && !minecraftHandler.busy && buildListView.currentIndex >= 0 && buildModel.get(buildListView.currentIndex).category === "local"
 
                     contentItem: Item {
                         anchors.fill: parent
@@ -732,7 +745,9 @@ Item {
                     hoverEnabled: true
                     flat: true
                     padding: 0
-                    visible: minecraftHandler.buildExists
+                    visible: !minecraftHandler.busy
+                             && (minecraftHandler.canDelete
+                                 || (buildListView.currentIndex >= 0 && buildModel.get(buildListView.currentIndex).category === "local"))
 
                     contentItem: Item {
                         anchors.fill: parent
@@ -776,11 +791,9 @@ Item {
                     onClicked: {
                         var cur = buildModel.get(buildListView.currentIndex)
                         if (!cur) return
-                        if (cur.category === "local")
-                            localBuildsManager.deleteBuild(cur.name)
-                        else
-                            minecraftHandler.deleteCurrentBuild()
-                        rebuildBuildsModel()
+                        errorDialog.confirm("Удалить сборку «" + cur.name + "»?",
+                                            "Будут удалены все файлы сборки, включая миры, скриншоты и настройки. Это действие нельзя отменить.",
+                                            "Удалить", "delete")
                     }
                 }
             }
@@ -945,6 +958,54 @@ Item {
                                 }
                             }
                         }
+
+                        Text {
+                            property int major: settings.javaMajorOf(settings.javaPath)
+                            text: String(settings.javaPath).trim() === "" ? "Java не выбрана"
+                                  : (major > 0 ? "Найдена Java " + major : "Файл не найден или это не Java")
+                            color: major > 0 ? "#8FD694" : "#FF9B9B"
+                            font.pixelSize: 11
+                        }
+
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            visible: root.javas.length > 0
+
+                            Text {
+                                text: "Найдено на ПК:"
+                                color: Qt.rgba(1, 1, 1, 0.4)
+                                font.pixelSize: 11
+                                height: 24
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            Repeater {
+                                model: root.javas
+                                delegate: Button {
+                                    id: javaChip
+                                    required property var modelData
+                                    height: 24
+                                    hoverEnabled: true
+                                    flat: true
+                                    padding: 0
+                                    leftPadding: 10
+                                    rightPadding: 10
+                                    contentItem: Text {
+                                        text: "Java " + javaChip.modelData.major
+                                        color: settings.javaPath === javaChip.modelData.path ? "#000000" : "#FFFFFF"
+                                        font.pixelSize: 11
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    background: Rectangle {
+                                        radius: 12
+                                        color: settings.javaPath === javaChip.modelData.path ? "#FFF0B5"
+                                               : (javaChip.hovered ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.06))
+                                        border.color: Qt.rgba(1, 1, 1, 0.12)
+                                    }
+                                    onClicked: settings.javaPath = javaChip.modelData.path
+                                }
+                            }
+                        }
                     }
 
                     ColumnLayout {
@@ -1090,17 +1151,71 @@ Item {
         }
     }
 
+    Rectangle {
+        id: offlineBanner
+        visible: minecraftHandler.offline
+        anchors.top: titleBar.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: 28
+        color: "#7a5c12"
+        z: 89
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 12
+            anchors.rightMargin: 12
+            spacing: 10
+
+            Text {
+                Layout.fillWidth: true
+                color: "#ffffff"
+                font.pixelSize: 12
+                elide: Text.ElideRight
+                text: "Нет связи с сервером — показаны сохранённые данные. Лаунчер повторит попытку сам."
+            }
+            Text {
+                text: "Повторить сейчас"
+                color: "#FFF0B5"
+                font.pixelSize: 12
+                font.underline: true
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: { minecraftHandler.fetchBuildsList(); minecraftHandler.fetchNews() }
+                }
+            }
+        }
+    }
+
     ProgressPanel {
         id: progressPanel
         objectName: "progressPanel"
-        onCancelled: progressPanel.close()
+
+        onCancelled: {
+            if (localBuildsManager.isBusy()) localBuildsManager.cancelCreation()
+            else minecraftHandler.cancelInstallation()
+            cancelSafetyTimer.restart()
+        }
+    }
+
+    Timer {
+        id: cancelSafetyTimer
+        interval: 4000
+        onTriggered: progressPanel.close()
     }
 
     ErrorDialog {
         id: errorDialog
         objectName: "errorDialog"
-        //onRetried: minecraftHandler.retryLastOperation()
-        onClosed: console.log("Ошибка закрыта")
+
+        onRetried: {
+            if (errorDialog.pendingAction === "delete") root.deleteCurrentBuild()
+            else minecraftHandler.retryLastOperation()
+        }
+        onClosed: {
+            if (errorDialog.pendingAction !== "delete") minecraftHandler.discardFailedOperation()
+        }
     }
 
     BuildCreatorDialog {
@@ -1108,6 +1223,24 @@ Item {
     }
 
     property var serverBuilds: []
+    property var javas: []
+
+    function deleteCurrentBuild() {
+        var cur = buildModel.get(buildListView.currentIndex)
+        if (!cur) return
+        if (cur.category === "local")
+            localBuildsManager.deleteBuild(cur.name)
+        else
+            minecraftHandler.deleteCurrentBuild()
+        rebuildBuildsModel()
+    }
+
+    Component.onCompleted: javas = settings.detectedJavas()
+
+    Connections {
+        target: settings
+        function onJavaListChanged() { root.javas = settings.detectedJavas() }
+    }
     property bool settingsOk: true
     property string settingsProblems: ""
 
@@ -1190,6 +1323,7 @@ Item {
 
         function onInstallProgress(stage, details, progress) {
             progressPanel.title = "Установка сборки"
+            progressPanel.cancellable = true
             progressPanel.stage = stage
             progressPanel.details = details
 
@@ -1207,6 +1341,11 @@ Item {
             progressPanel.close()
             errorDialog.show(title, message, details, canRetry)
         }
+
+        function onInstallEnded() {
+            cancelSafetyTimer.stop()
+            progressPanel.close()
+        }
     }
 
     Connections {
@@ -1216,8 +1355,37 @@ Item {
             rebuildBuildsModel()
         }
 
+        function onCreationProgress(stage, details, progress) {
+            progressPanel.title = "Создание сборки"
+            progressPanel.cancellable = true
+            progressPanel.stage = stage
+            progressPanel.details = details
+            if (progress < 0) {
+                progressPanel.indeterminate = true
+            } else {
+                progressPanel.indeterminate = false
+                progressPanel.progress = progress
+            }
+            if (progressPanel.opacity < 1.0) progressPanel.open()
+        }
+
         function onCreationFinished(name) {
+            cancelSafetyTimer.stop()
             progressPanel.close()
+            rebuildBuildsModel()
+        }
+
+        function onCreationCancelled(name) {
+            cancelSafetyTimer.stop()
+            progressPanel.close()
+            rebuildBuildsModel()
+        }
+
+        function onCreationError(message) {
+            cancelSafetyTimer.stop()
+            progressPanel.close()
+            if (!buildCreatorDialog.visible)
+                errorDialog.show("Не удалось создать или изменить сборку", message, "", false)
             rebuildBuildsModel()
         }
     }
