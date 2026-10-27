@@ -163,12 +163,23 @@ private:
     bool loadState(qint64 total);
     bool isAlreadyComplete() const;
     void emitProgress(bool force);
+    void onStallTick();
+    void recycleConnections();
     QNetworkAccessManager* nextManager();
 
     std::array<QNetworkAccessManager*, 4> m_mgrs{};
     int m_nextMgr = 0;
 
     QString m_url;
+    QString m_finalUrl;
+    QElapsedTimer m_finalAge;
+    QTimer* m_stallTimer = nullptr;
+    QElapsedTimer m_recycleClock;
+    double m_avgSpeed = 0.0;
+    double m_peakSpeed = 0.0;
+    qint64 m_stallLastBytes = 0;
+    int m_stallLowTicks = 0;
+    int m_stallTicks = 0;
     QString m_path;
     qint64 m_chunkBytes = 4 * 1024 * 1024;
     int m_parallel = 8;

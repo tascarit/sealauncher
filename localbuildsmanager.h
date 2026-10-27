@@ -43,6 +43,8 @@ public:
                                const QString& loaderVersion, const QJsonArray& mods);
     Q_INVOKABLE QJsonArray getInstalledModsForBuild(const QString& name) const;
     Q_INVOKABLE void cancelCreation();
+    Q_INVOKABLE void repairBuild(const QString& name);
+    Q_INVOKABLE void setReservedNames(const QStringList& names);
     Q_INVOKABLE bool isBusy() const { return m_opActive; }
 
 signals:
@@ -73,6 +75,7 @@ private:
     QString readMetaPackVersion(const QString& gamePath) const;
     bool cleanRuntime(const QString& buildPath);
     bool isNameSafe(const QString& name) const;
+    bool nameConflict(const QString& name) const;
 
     void beginPipeline(const QString& name, bool installLoader, bool isCreate);
     void onResolved(const QList<ModDownloadTask>& tasks);
@@ -105,6 +108,7 @@ private:
     ModDependencyResolver* m_resolver = nullptr;
     DownloadBatch* m_modsBatch = nullptr;
 
+    QStringList m_reserved;
     quint64 m_loaderReqSeq = 0;
     QStringList m_mcVersionsCache;
 };

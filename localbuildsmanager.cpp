@@ -19,11 +19,19 @@ namespace {
 
 bool nameIsSafe(const QString& n)
 {
-    if (n.isEmpty() || n != n.trimmed()) return false;
-    if (n == QLatin1String(".") || n == QLatin1String("..")) return false;
+    if (n.isEmpty() || n != n.trimmed() || n.size() > 50) return false;
+    if (n == QLatin1String(".") || n == QLatin1String("..") || n.endsWith('.')) return false;
     static const QString bad = QStringLiteral("/\\:*?\"<>|");
     for (const QChar c : n)
-        if (bad.contains(c)) return false;
+        if (bad.contains(c) || c.unicode() < 32) return false;
+    static const QStringList reserved = {
+        QStringLiteral("con"), QStringLiteral("prn"), QStringLiteral("aux"), QStringLiteral("nul"),
+        QStringLiteral("com1"), QStringLiteral("com2"), QStringLiteral("com3"), QStringLiteral("com4"),
+        QStringLiteral("com5"), QStringLiteral("com6"), QStringLiteral("com7"), QStringLiteral("com8"), QStringLiteral("com9"),
+        QStringLiteral("lpt1"), QStringLiteral("lpt2"), QStringLiteral("lpt3"), QStringLiteral("lpt4"),
+        QStringLiteral("lpt5"), QStringLiteral("lpt6"), QStringLiteral("lpt7"), QStringLiteral("lpt8"), QStringLiteral("lpt9")
+    };
+    if (reserved.contains(n.section('.', 0, 0).toLower())) return false;
     return true;
 }
 
@@ -146,6 +154,36 @@ int LocalBuildsManager::indexOf(const QString& name) const
 bool LocalBuildsManager::contains(const QString& name) const
 {
     return indexOf(name) >= 0;
+}
+
+bool LocalBuildsManager::nameConflict(const QString& name) const
+{
+    for (const Entry& e : m_entries)
+        if (e.name.compare(name, Qt::CaseInsensitive) == 0) return true;
+    for (const QString& r : m_reserved)
+        if (r.compare(name, Qt::CaseInsensitive) == 0) return true;
+    return false;
+}
+
+void LocalBuildsManager::setReservedNames(const QStringList& names)
+{
+    m_reserved = names;
+}
+
+void LocalBuildsManager::repairBuild(const QString& name)
+{
+    if (m_opActive || (m_mh && m_mh->busy())) {
+        emit creationError(QStringLiteral("Дождитесь завершения текущей операции."));
+        return;
+    }
+    const int i = indexOf(name);
+    if (i < 0 || !nameIsSafe(name)) {
+        emit creationError(QStringLiteral("Сборка не найдена."));
+        return;
+    }
+    m_entries[i].pendingSync = true;
+    save();
+    beginPipeline(name, true, false);
 }
 
 LocalBuildsManager::Entry LocalBuildsManager::findEntry(const QString& name) const
@@ -445,7 +483,7 @@ void LocalBuildsManager::createBuild(const QString& name, const QString& mcVersi
         emit creationError(QStringLiteral("В названии нельзя использовать символы: \\ / : * ? \" < > |"));
         return;
     }
-    if (contains(cleanName)) { emit creationError(QStringLiteral("Сборка с таким именем уже существует")); return; }
+    if (nameConflict(cleanName)) { emit creationError(QStringLiteral("Сборка с таким именем уже существует")); return; }
     if (QDir(m_sm->gameDir() + QLatin1Char('/') + cleanName).exists()) {
         emit creationError(QStringLiteral("Папка с таким именем уже существует (возможно, это другая сборка)"));
         return;
@@ -505,7 +543,7 @@ void LocalBuildsManager::editBuild(const QString& oldName, const QString& newNam
         emit creationError(QStringLiteral("В названии нельзя использовать символы: \\ / : * ? \" < > |"));
         return;
     }
-    if (cleanNew != cleanOld && contains(cleanNew)) {
+    if (cleanNew.compare(cleanOld, Qt::CaseInsensitive) != 0 && nameConflict(cleanNew)) {
         emit creationError(QStringLiteral("Сборка с именем '%1' уже существует").arg(cleanNew));
         return;
     }
@@ -518,7 +556,7 @@ void LocalBuildsManager::editBuild(const QString& oldName, const QString& newNam
     const QString oldPath = m_sm->gameDir() + QLatin1Char('/') + cleanOld;
     QString newPath = m_sm->gameDir() + QLatin1Char('/') + cleanNew;
 
-    if (cleanNew != cleanOld && QDir(newPath).exists()) {
+    if (cleanNew.compare(cleanOld, Qt::CaseInsensitive) != 0 && QDir(newPath).exists()) {
         emit creationError(QStringLiteral("Папка «%1» уже существует").arg(cleanNew));
         return;
     }

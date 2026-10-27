@@ -245,6 +245,8 @@ void DownloadBatch::launch(const Pending& p)
     m_doneBytes += have;
 
     QNetworkRequest req = DownloadUtil::makeRequest(QUrl(p.item.url));
+    if (p.item.size >= 8LL * 1024 * 1024)
+        req.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
     if (have > 0)
         req.setRawHeader("Range", "bytes=" + QByteArray::number(have) + "-");
 
@@ -397,6 +399,9 @@ struct RangedDownload::ActiveChunk {
     bool bad = false;
     bool timedOut = false;
     bool diskError = false;
+    bool usedFinal = false;
+    bool urlCaptured = false;
+    bool recycled = false;
 };
 
 RangedDownload::RangedDownload(QObject* parent) : QObject(parent) {}
@@ -442,6 +447,8 @@ void RangedDownload::start(const QString& url, const QString& path, int chunkMb,
     m_probeAttempt = 0;
     m_probeKind = 0;
     m_probeTotal = 0;
+    m_finalUrl.clear();
+    m_finalAge.invalidate();
     m_total = 0;
     m_doneBytes = 0;
     m_retrying = 0;
@@ -484,6 +491,7 @@ void RangedDownload::cancel()
 
 void RangedDownload::abortAll()
 {
+    if (m_stallTimer) m_stallTimer->stop();
     if (m_probeReply) {
         m_probeReply->disconnect(this);
         m_probeReply->abort();
@@ -520,6 +528,7 @@ void RangedDownload::probe()
     m_probeTotal = 0;
 
     QNetworkRequest req = DownloadUtil::makeRequest(QUrl(m_url));
+    req.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
     req.setRawHeader("Range", "bytes=0-0");
     QNetworkReply* reply = nextManager()->get(req);
     m_probeReply = reply;
@@ -570,7 +579,13 @@ void RangedDownload::onProbeFinished(QNetworkReply* reply)
 
     const int st = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     QString es = reply->errorString();
+    const QString probeUrl = reply->url().toString();
     reply->deleteLater();
+
+    if (m_probeKind == 1 && !probeUrl.isEmpty() && probeUrl != m_url) {
+        m_finalUrl = probeUrl;
+        m_finalAge.restart();
+    }
 
     if (m_probeKind == 1) { beginChunks(m_probeTotal); return; }
     if (m_probeKind == 2) { startFallback(m_probeTotal); return; }
@@ -678,7 +693,63 @@ void RangedDownload::beginChunks(qint64 total)
 
     saveState(false);
     emitProgress(true);
+
+    if (!m_stallTimer) {
+        m_stallTimer = new QTimer(this);
+        m_stallTimer->setInterval(1000);
+        connect(m_stallTimer, &QTimer::timeout, this, &RangedDownload::onStallTick);
+    }
+    m_avgSpeed = 0.0;
+    m_peakSpeed = 0.0;
+    m_stallLastBytes = m_doneBytes;
+    m_stallLowTicks = 0;
+    m_stallTicks = 0;
+    m_recycleClock.start();
+    m_stallTimer->start();
+
     pumpChunks();
+}
+
+void RangedDownload::onStallTick()
+{
+    if (!m_running || m_active.isEmpty()) {
+        m_stallLastBytes = m_doneBytes;
+        return;
+    }
+
+    const double inst = double(m_doneBytes - m_stallLastBytes);
+    m_stallLastBytes = m_doneBytes;
+    m_stallTicks++;
+
+    m_avgSpeed = m_avgSpeed <= 0.0 ? inst : (m_avgSpeed * 0.6 + inst * 0.4);
+    m_peakSpeed = qMax(m_peakSpeed * 0.98, m_avgSpeed);
+
+    if (m_stallTicks >= 5 && m_peakSpeed > 1.5e6 && m_avgSpeed < m_peakSpeed * 0.25)
+        m_stallLowTicks++;
+    else
+        m_stallLowTicks = 0;
+
+    if (m_stallLowTicks >= 4 && m_recycleClock.elapsed() > 10000) {
+        m_stallLowTicks = 0;
+        m_recycleClock.restart();
+        recycleConnections();
+    }
+}
+
+void RangedDownload::recycleConnections()
+{
+    qWarning() << "[DL] speed collapsed, recycling connections";
+
+    for (QNetworkAccessManager* mgr : m_mgrs)
+        if (mgr) mgr->clearConnectionCache();
+
+    const QList<ActiveChunk*> act = m_active;
+    for (ActiveChunk* ac : act) {
+        if (!m_running) break;
+        if (!m_active.contains(ac)) continue;
+        ac->recycled = true;
+        ac->reply->abort();
+    }
 }
 
 void RangedDownload::pumpChunks()
@@ -698,7 +769,11 @@ void RangedDownload::launchChunk(int idx)
     ac->idx = idx;
     ac->startGot = c.got;
 
-    QNetworkRequest req = DownloadUtil::makeRequest(QUrl(m_url));
+    const bool useFinal = !m_finalUrl.isEmpty() && m_finalAge.isValid() && m_finalAge.elapsed() < 120000;
+    ac->usedFinal = useFinal;
+
+    QNetworkRequest req = DownloadUtil::makeRequest(QUrl(useFinal ? m_finalUrl : m_url));
+    req.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
     req.setRawHeader("Range", "bytes=" + QByteArray::number(c.start + c.got) + "-" + QByteArray::number(c.end));
 
     QNetworkReply* reply = nextManager()->get(req);
@@ -731,6 +806,15 @@ void RangedDownload::onChunkReadyRead(ActiveChunk* ac)
         ac->reply->readAll();
         ac->reply->abort();
         return;
+    }
+
+    if (!ac->usedFinal && !ac->urlCaptured) {
+        ac->urlCaptured = true;
+        const QString u = ac->reply->url().toString();
+        if (!u.isEmpty() && u != m_url) {
+            m_finalUrl = u;
+            m_finalAge.restart();
+        }
     }
 
     Chunk& c = m_chunks[ac->idx];
@@ -768,9 +852,17 @@ void RangedDownload::onChunkFinished(ActiveChunk* ac)
     const bool progressed = ac->gotNow > 0;
     const bool diskErr = ac->diskError;
     const bool bad = ac->bad;
+    const bool recycled = ac->recycled;
+    const bool usedFinal = ac->usedFinal;
     teardownChunk(ac);
 
     if (!m_running) return;
+
+    if (recycled) {
+        m_todo.prepend(idx);
+        pumpChunks();
+        return;
+    }
 
     if (diskErr) {
         fail(QStringLiteral("Ошибка записи на диск: ") + (m_file ? m_file->errorString() : QString()));
@@ -792,7 +884,9 @@ void RangedDownload::onChunkFinished(ActiveChunk* ac)
         return;
     }
     const bool shortRead = httpOk;
-    if (!shortRead && !DownloadUtil::isRetryableHttp(st)) {
+    const bool urlExpired = usedFinal && (st == 400 || st == 401 || st == 403 || st == 404);
+    if (urlExpired) m_finalUrl.clear();
+    if (!shortRead && !urlExpired && !DownloadUtil::isRetryableHttp(st)) {
         fail(QStringLiteral("HTTP %1: %2").arg(st).arg(es));
         return;
     }
@@ -840,6 +934,7 @@ void RangedDownload::fail(const QString& err)
 void RangedDownload::complete()
 {
     m_running = false;
+    if (m_stallTimer) m_stallTimer->stop();
 
     if (m_file) {
         m_file->flush();

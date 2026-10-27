@@ -37,6 +37,8 @@ class MinecraftHandler: public QObject
     Q_PROPERTY(bool updateAvailable READ updateAvailable NOTIFY updateAvailableChanged)
     Q_PROPERTY(bool installation READ installation NOTIFY installationChanged)
     Q_PROPERTY(bool canDelete READ canDelete NOTIFY canDeleteChanged)
+    Q_PROPERTY(QString installedPackVersion READ installedPackVersion NOTIFY packVersionsChanged)
+    Q_PROPERTY(QString selectedPackVersion READ selectedPackVersion NOTIFY packVersionsChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(bool offline READ offline NOTIFY offlineChanged)
 
@@ -49,6 +51,8 @@ public:
     bool installation() const { return m_installation; }
     bool canDelete() const { return m_canDelete; }
     bool busy() const { return m_busy; }
+    QString installedPackVersion() const { return m_shownInstalled; }
+    QString selectedPackVersion() const { return m_shownSelected; }
     bool offline() const { return m_offline; }
 
     void Initialize(QQuickView*, QmlHandler*, SettingsManager*, SettingsController*);
@@ -70,6 +74,7 @@ public:
     Q_INVOKABLE void installLocalBuild(const QString& buildName, const QString& mcVersion,
                                        const QString& loader, const QString& loaderVersion);
 
+    Q_INVOKABLE void refreshState();
     Q_INVOKABLE void cancelInstallation();
     Q_INVOKABLE void retryLastOperation();
     Q_INVOKABLE void discardFailedOperation();
@@ -80,6 +85,7 @@ signals:
     void installationChanged();
     void canDeleteChanged();
     void busyChanged();
+    void packVersionsChanged();
     void offlineChanged();
 
     void buildsListReady(const QJsonArray& builds);
@@ -121,7 +127,7 @@ private:
     static QString versionIdFor(const BuildSpec& s);
     QString readInstalledPackVersion(const QString& gamePath) const;
     bool loaderAlreadyInstalled(const QString& gamePath, const BuildSpec& spec) const;
-    void writeBuildMeta(const QString& gamePath, const BuildSpec& spec);
+    bool writeBuildMeta(const QString& gamePath, const BuildSpec& spec);
     void prepareForUpdate(const QString& gamePath, bool keepLoader);
     void writeInstallMarker(const QString& gamePath) const;
     void removeInstallMarker(const QString& gamePath) const;
@@ -170,6 +176,8 @@ private:
 
     BuildSpec m_sel;
     QString m_installedPackVersion;
+    QString m_shownInstalled;
+    QString m_shownSelected;
     bool m_buildExists = false;
     bool m_updateAvailable = false;
     bool m_installation = false;

@@ -31,6 +31,10 @@ Item {
 
     Connections {
         target: Window.window
+        function onActiveChanged() {
+            if (Window.window && Window.window.active) minecraftHandler.refreshState()
+        }
+
         function onVisibilityChanged() {
             const v = Window.window ? Window.window.visibility : Window.Windowed
             if (v === Window.Hidden || v === Window.Minimized) backgroundVideo.pause()
@@ -271,7 +275,8 @@ Item {
 
                         onClicked: {
                             buildListView.currentIndex = index
-                            minecraftHandler.reCheckBuilds(model.name, model.v, model.loader, model.mcV, model.git, model.parts, model.packVersion || "0.1")
+                            settings.lastBuild = model.name
+                            minecraftHandler.reCheckBuilds(model.name, model.v, model.loader, model.mcV, model.git, model.parts, String(model.packVersion || "0.1"))
                         }
 
                     }
@@ -605,6 +610,7 @@ Item {
                     objectName: "playButton"
                     id: playButton
                     anchors.centerIn: parent
+                    anchors.verticalCenterOffset: -20
                     width: 260
                     height: 48
                     hoverEnabled: true
@@ -670,7 +676,11 @@ Item {
                             settingsOpen = true
                             return
                         }
-                        minecraftHandler.mainButtonClick()
+                        var curBuild = buildListView.currentIndex >= 0 ? buildModel.get(buildListView.currentIndex) : null
+                        if (curBuild && curBuild.category === "local" && !minecraftHandler.buildExists && !minecraftHandler.busy)
+                            localBuildsManager.repairBuild(curBuild.name)
+                        else
+                            minecraftHandler.mainButtonClick()
                     }
                 }
 
@@ -732,6 +742,99 @@ Item {
                             buildCreatorDialog.loadBuildForEditing(cur.name)
                             buildCreatorDialog.open()
                         }
+                    }
+                }
+
+                Text {
+                    visible: minecraftHandler.updateAvailable && !minecraftHandler.busy
+                    anchors.bottom: playButton.top
+                    anchors.bottomMargin: 6
+                    anchors.horizontalCenter: playButton.horizontalCenter
+                    text: "Установлена v" + minecraftHandler.installedPackVersion + "  →  доступна v" + minecraftHandler.selectedPackVersion
+                    color: Qt.rgba(1, 1, 1, 0.6)
+                    font.pixelSize: 12
+                }
+
+                Rectangle {
+                    id: folderButton
+                    visible: minecraftHandler.canDelete && !minecraftHandler.busy
+                    anchors.top: playButton.bottom
+                    anchors.topMargin: 8
+                    anchors.horizontalCenter: playButton.horizontalCenter
+                    anchors.verticalCenterOffset: -20
+                    width: 180
+                    height: 30
+                    radius: 2
+                    color: folderMouse.pressed ? "#2B2B2B" : (folderMouse.containsMouse ? "#4A4A4A" : "#3A3A3A")
+                    border.width: 2
+                    border.color: folderMouse.pressed ? "#171717" : (folderMouse.containsMouse ? "#9A9A9A" : "#5C5C5C")
+                    scale: folderMouse.pressed ? 0.97 : 1.0
+
+                    Behavior on color { ColorAnimation { duration: 80 } }
+                    Behavior on border.color { ColorAnimation { duration: 80 } }
+                    Behavior on scale { NumberAnimation { duration: 60 } }
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 3
+                        radius: 1
+                        color: "#222222"
+                    }
+
+                    Row {
+                        anchors.centerIn: parent
+                        anchors.verticalCenterOffset: -1
+                        spacing: 9
+
+                        Item {
+                            width: 18
+                            height: 14
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            Rectangle {
+                                x: 0
+                                y: 0
+                                width: 8
+                                height: 4
+                                radius: 1
+                                color: folderMouse.containsMouse ? "#FFD966" : "#D9A93A"
+                            }
+                            Rectangle {
+                                x: 0
+                                y: 2
+                                width: 18
+                                height: 12
+                                radius: 1
+                                color: folderMouse.containsMouse ? "#FFE58F" : "#E8BC4F"
+                                border.width: 1
+                                border.color: "#8A6A1E"
+                            }
+                            Rectangle {
+                                x: 1
+                                y: 5
+                                width: 16
+                                height: 2
+                                color: Qt.rgba(1, 1, 1, 0.35)
+                            }
+                        }
+
+                        Text {
+                            text: "ОТКРЫТЬ ПАПКУ"
+                            color: folderMouse.containsMouse ? "#FFF0B5" : "#E6E6E6"
+                            font.family: minecraftFont.name
+                            font.pixelSize: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                    }
+
+                    MouseArea {
+                        id: folderMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: minecraftHandler.openBuildDir()
                     }
                 }
 
@@ -1277,7 +1380,7 @@ Item {
             buildModel.append({
                 name: serverBuilds[i].name || "",
                 version: serverBuilds[i].version || "",
-                packVersion: serverBuilds[i].packVersion || "",
+                packVersion: String(serverBuilds[i].packVersion || ""),
                 icon: serverBuilds[i].icon || "",
                 v: serverBuilds[i].v || "",
                 loader: serverBuilds[i].loader || "vanilla",
@@ -1287,6 +1390,10 @@ Item {
                 category: "server"
             })
         }
+
+        var reservedNames = []
+        for (var r = 0; r < serverBuilds.length; r++) reservedNames.push(serverBuilds[r].name || "")
+        localBuildsManager.setReservedNames(reservedNames)
 
         var local = localBuildsManager.buildsArray()
         for (var j = 0; j < local.length; j++) {
@@ -1304,6 +1411,8 @@ Item {
             })
         }
 
+        if (prevName === "") prevName = settings.lastBuild
+
         var idx = 0
         if (prevName !== "") {
             for (var k = 0; k < buildModel.count; k++) {
@@ -1314,7 +1423,8 @@ Item {
         if (buildModel.count > 0) {
             buildListView.currentIndex = idx
             var b = buildModel.get(idx)
-            minecraftHandler.reCheckBuilds(b.name, b.v, b.loader, b.mcV, b.git, b.parts, b.packVersion)
+            settings.lastBuild = b.name
+            minecraftHandler.reCheckBuilds(b.name, b.v, b.loader, b.mcV, b.git, b.parts, String(b.packVersion || "0.1"))
         }
     }
 
@@ -1421,7 +1531,7 @@ Item {
         if (buildModel.count === 0) return
         buildListView.currentIndex = 0
         var b = buildModel.get(0)
-        minecraftHandler.reCheckBuilds(b.name, b.v, b.loader, b.mcV, b.git, b.parts, b.packVersion)
+        minecraftHandler.reCheckBuilds(b.name, b.v, b.loader, b.mcV, b.git, b.parts, String(b.packVersion || "0.1"))
     }
 
     Timer {
@@ -1434,5 +1544,3 @@ Item {
         }
     }
 }
-
-

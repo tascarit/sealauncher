@@ -77,19 +77,16 @@ void ModrinthApi::sendGet(const std::shared_ptr<Req>& r)
 
 void ModrinthApi::searchMods(const QString& query, const QString& gameVersion, const QString& loader)
 {
-    QUrlQuery params;
-    params.addQueryItem("query", query);
-    params.addQueryItem("limit", "50");
-    params.addQueryItem("index", "relevance");
-
     QJsonArray facets;
     if (!gameVersion.isEmpty()) facets.append(QJsonArray{"versions:" + gameVersion});
     if (!loader.isEmpty())      facets.append(QJsonArray{"categories:" + loader});
     facets.append(QJsonArray{"project_type:mod"});
-    params.addQueryItem("facets", QString::fromUtf8(QJsonDocument(facets).toJson(QJsonDocument::Compact)));
+    const auto enc = [](const QString& s) { return QString::fromLatin1(QUrl::toPercentEncoding(s)); };
+    const QString queryString = "query=" + enc(query) + "&limit=50&index=relevance&facets="
+                                + enc(QString::fromUtf8(QJsonDocument(facets).toJson(QJsonDocument::Compact)));
 
     const quint64 seq = ++m_searchSeq;
-    getJson("/search?" + params.toString(QUrl::FullyEncoded), this,
+    getJson("/search?" + queryString, this,
             [this, seq](const QJsonDocument& doc) {
                 if (seq != m_searchSeq) return;
                 emit searchCompleted(doc.object().value("hits").toArray());
@@ -117,14 +114,15 @@ void ModrinthApi::requestProject(const QString& projectId, std::function<void(co
 void ModrinthApi::requestVersions(const QString& projectId, const QString& gameVersion, const QString& loader,
                                   std::function<void(const QJsonArray&)> cb, ErrorCb onError, QObject* context)
 {
-    QUrlQuery params;
+    const auto enc = [](const QString& s) { return QString::fromLatin1(QUrl::toPercentEncoding(s)); };
+    QStringList params;
     if (!gameVersion.isEmpty())
-        params.addQueryItem("game_versions", QString::fromUtf8(QJsonDocument(QJsonArray{gameVersion}).toJson(QJsonDocument::Compact)));
+        params << "game_versions=" + enc(QString::fromUtf8(QJsonDocument(QJsonArray{gameVersion}).toJson(QJsonDocument::Compact)));
     if (!loader.isEmpty())
-        params.addQueryItem("loaders", QString::fromUtf8(QJsonDocument(QJsonArray{loader}).toJson(QJsonDocument::Compact)));
+        params << "loaders=" + enc(QString::fromUtf8(QJsonDocument(QJsonArray{loader}).toJson(QJsonDocument::Compact)));
 
-    QString endpoint = "/project/" + projectId + "/version";
-    if (!params.isEmpty()) endpoint += "?" + params.toString(QUrl::FullyEncoded);
+    QString endpoint = "/project/" + enc(projectId) + "/version";
+    if (!params.isEmpty()) endpoint += "?" + params.join('&');
 
     getJson(endpoint, context,
             [cb](const QJsonDocument& doc) { cb(doc.array()); }, std::move(onError));

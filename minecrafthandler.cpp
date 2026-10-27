@@ -48,11 +48,19 @@ QString normZipPath(QString p)
 bool isSafeBuildName(const QString& n)
 {
     const QString t = n.trimmed();
-    if (t.isEmpty() || t != n) return false;
-    if (t == QLatin1String(".") || t == QLatin1String("..")) return false;
+    if (t.isEmpty() || t != n || t.size() > 50) return false;
+    if (t == QLatin1String(".") || t == QLatin1String("..") || t.endsWith('.')) return false;
     static const QString bad = QStringLiteral("/\\:*?\"<>|");
     for (const QChar c : t)
-        if (bad.contains(c)) return false;
+        if (bad.contains(c) || c.unicode() < 32) return false;
+    static const QStringList reserved = {
+        QStringLiteral("con"), QStringLiteral("prn"), QStringLiteral("aux"), QStringLiteral("nul"),
+        QStringLiteral("com1"), QStringLiteral("com2"), QStringLiteral("com3"), QStringLiteral("com4"),
+        QStringLiteral("com5"), QStringLiteral("com6"), QStringLiteral("com7"), QStringLiteral("com8"), QStringLiteral("com9"),
+        QStringLiteral("lpt1"), QStringLiteral("lpt2"), QStringLiteral("lpt3"), QStringLiteral("lpt4"),
+        QStringLiteral("lpt5"), QStringLiteral("lpt6"), QStringLiteral("lpt7"), QStringLiteral("lpt8"), QStringLiteral("lpt9")
+    };
+    if (reserved.contains(t.section('.', 0, 0).toLower())) return false;
     return true;
 }
 
@@ -273,7 +281,7 @@ void MinecraftHandler::refreshSelectedState()
 
             if (exists) {
                 m_installedPackVersion = readInstalledPackVersion(gp);
-                update = (m_installedPackVersion != m_sel.packVersion);
+                update = (m_installedPackVersion.trimmed() != m_sel.packVersion.trimmed());
             }
         }
     }
@@ -285,6 +293,18 @@ void MinecraftHandler::refreshSelectedState()
     setBuildExists(exists);
     setUpdateAvailable(update);
     setCanDelete(hasFiles && !activeIsSelected);
+
+    const QString shownInstalled = exists ? m_installedPackVersion : QString();
+    if (shownInstalled != m_shownInstalled || m_sel.packVersion != m_shownSelected) {
+        m_shownInstalled = shownInstalled;
+        m_shownSelected = m_sel.packVersion;
+        emit packVersionsChanged();
+    }
+}
+
+void MinecraftHandler::refreshState()
+{
+    refreshSelectedState();
 }
 
 void MinecraftHandler::reCheckBuilds(const QString& build, const QString& version, const QString& loader,
@@ -298,7 +318,7 @@ void MinecraftHandler::reCheckBuilds(const QString& build, const QString& versio
     m_sel.mcVersion = mcVer;
     m_sel.archiveLink = git;
     m_sel.parts = qMax(1, parts);
-    m_sel.packVersion = packVer.isEmpty() ? QStringLiteral("0.1") : packVer;
+    m_sel.packVersion = packVer.trimmed().isEmpty() ? QStringLiteral("0.1") : packVer.trimmed();
 
     refreshSelectedState();
 }
@@ -320,7 +340,7 @@ bool MinecraftHandler::loaderAlreadyInstalled(const QString& gamePath, const Bui
     return QFileInfo::exists(versionJsonFile(gamePath, versionIdFor(spec)));
 }
 
-void MinecraftHandler::writeBuildMeta(const QString& gamePath, const BuildSpec& spec)
+bool MinecraftHandler::writeBuildMeta(const QString& gamePath, const BuildSpec& spec)
 {
     QJsonObject o;
     o[QStringLiteral("packVersion")] = spec.packVersion;
@@ -331,11 +351,14 @@ void MinecraftHandler::writeBuildMeta(const QString& gamePath, const BuildSpec& 
     o[QStringLiteral("parts")] = spec.parts;
     o[QStringLiteral("installedAt")] = double(QDateTime::currentSecsSinceEpoch());
 
-    if (!writeFileAtomic(gamePath + QStringLiteral("/sealauncher_meta.json"),
-                         QJsonDocument(o).toJson(QJsonDocument::Indented)))
-        newDebug() << "[Meta] Cannot write meta in" << gamePath;
+    const bool written = writeFileAtomic(gamePath + QStringLiteral("/sealauncher_meta.json"),
+                                         QJsonDocument(o).toJson(QJsonDocument::Indented));
+    const bool verified = written && readInstalledPackVersion(gamePath).trimmed() == spec.packVersion.trimmed();
+    if (!verified)
+        newDebug() << "[Meta] Cannot write or verify meta in" << gamePath;
     else
         newDebug() << "[Meta] Written pack version:" << spec.packVersion;
+    return verified;
 }
 
 void MinecraftHandler::writeInstallMarker(const QString& gamePath) const
@@ -443,7 +466,7 @@ void MinecraftHandler::beginInstall(const BuildSpec& spec, bool update)
     m_installing = true;
 
     QDir().mkpath(m_tmpDir);
-    writeInstallMarker(gamePath);
+    if (!update) writeInstallMarker(gamePath);
 
     m_progressClock.invalidate();
     m_progressThrottle->start();
@@ -515,7 +538,12 @@ void MinecraftHandler::finishInstall()
     const BuildSpec job = m_job;
     const QString path = m_jobPath;
 
-    writeBuildMeta(path, job);
+    if (!writeBuildMeta(path, job)) {
+        failJob(QStringLiteral("Не удалось сохранить данные сборки"),
+                QStringLiteral("Файл sealauncher_meta.json не записался: проверьте права на папку и антивирус, затем нажмите «Повторить»."),
+                path, true);
+        return;
+    }
     removeInstallMarker(path);
     QDir(m_tmpDir).removeRecursively();
 
@@ -646,6 +674,54 @@ bool versionJsonUsable(const QString& path)
 {
     const QJsonObject o = readJsonObject(path);
     return !o.isEmpty() && o.contains(QStringLiteral("libraries"));
+}
+
+void extractNatives(const QList<QJsonObject>& chain, const QString& gamePath)
+{
+    const QString dir = gamePath + QStringLiteral("/natives");
+    QDir().mkpath(dir);
+    if (!QDir(dir).entryList(QDir::Files | QDir::NoDotAndDotDot).isEmpty()) return;
+
+    const QString arch = QSysInfo::currentCpuArchitecture().contains(QLatin1String("64")) ? QStringLiteral("64") : QStringLiteral("32");
+    const QString cleanDir = QDir::cleanPath(QDir(dir).absolutePath());
+
+    for (const QJsonObject& j : chain) {
+        for (const QJsonValue& v : j.value(QStringLiteral("libraries")).toArray()) {
+            const QJsonObject lib = v.toObject();
+            if (!rulesAllow(lib.value(QStringLiteral("rules")).toArray())) continue;
+
+            QString classifier = lib.value(QStringLiteral("natives")).toObject().value(QStringLiteral("windows")).toString();
+            if (classifier.isEmpty()) continue;
+            classifier.replace(QStringLiteral("${arch}"), arch);
+
+            const QString rel = lib.value(QStringLiteral("downloads")).toObject().value(QStringLiteral("classifiers")).toObject()
+                                    .value(classifier).toObject().value(QStringLiteral("path")).toString();
+            if (rel.isEmpty()) continue;
+
+            QZipReader zip(gamePath + QStringLiteral("/libraries/") + rel);
+            if (!zip.isReadable()) continue;
+
+            QStringList exclude;
+            for (const QJsonValue& e : lib.value(QStringLiteral("extract")).toObject().value(QStringLiteral("exclude")).toArray())
+                exclude << e.toString();
+
+            for (const QZipReader::FileInfo& fi : zip.fileInfoList()) {
+                if (!fi.isFile) continue;
+                const QString name = normZipPath(fi.filePath);
+                bool skip = name.isEmpty() || name.startsWith(QStringLiteral("META-INF"), Qt::CaseInsensitive);
+                for (const QString& ex : exclude)
+                    if (!ex.isEmpty() && name.startsWith(ex)) skip = true;
+                if (skip) continue;
+
+                const QString outPath = QDir::cleanPath(QDir(dir).absoluteFilePath(name));
+                if (!outPath.startsWith(cleanDir + QLatin1Char('/'))) continue;
+                QDir().mkpath(QFileInfo(outPath).absolutePath());
+
+                QFile out(outPath);
+                if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) out.write(zip.fileData(fi.filePath));
+            }
+        }
+    }
 }
 
 QString detectWrapperPrefix(const QList<QZipReader::FileInfo>& files)
@@ -847,7 +923,7 @@ void MinecraftHandler::downloadNextPart()
     reportProgress(QStringLiteral("Загрузка сборки"),
                    n > 1 ? QStringLiteral("Часть %1 из %2").arg(i + 1).arg(n) : QStringLiteral("Подключение..."),
                    -1.0, true);
-    m_ranged->start(m_partUrls.at(i), m_partPaths.at(i), 4, 16);
+    m_ranged->start(m_partUrls.at(i), m_partPaths.at(i), 16, 8);
 }
 
 void MinecraftHandler::mergeParts()
@@ -922,6 +998,7 @@ void MinecraftHandler::stagePrepare()
 {
     if (m_jobUpdate) {
         reportProgress(QStringLiteral("Подготовка обновления"), QStringLiteral("Удаление старых файлов сборки..."), -1.0, true);
+        writeInstallMarker(m_jobPath);
         prepareForUpdate(m_jobPath, m_jobSkipLoader);
     }
     defer(m_opGen, [this]() { stageLoader(); });
@@ -963,7 +1040,8 @@ QList<DownloadItem> MinecraftHandler::libraryItems(const QJsonObject& json, cons
             it.url = art.value(QStringLiteral("url")).toString();
             it.size = art.contains(QStringLiteral("size")) ? qint64(art.value(QStringLiteral("size")).toDouble()) : -1;
             it.sha1 = art.value(QStringLiteral("sha1")).toString();
-        } else if (lib.contains(QStringLiteral("name"))) {
+        } else if (lib.contains(QStringLiteral("name")) && !lib.contains(QStringLiteral("natives"))
+                   && (lib.contains(QStringLiteral("url")) || !lib.contains(QStringLiteral("downloads")))) {
             rel = mavenPathFromName(lib.value(QStringLiteral("name")).toString());
             QString base = lib.value(QStringLiteral("url")).toString();
             if (base.isEmpty()) base = QString::fromLatin1(kFabricMaven);
@@ -971,6 +1049,22 @@ QList<DownloadItem> MinecraftHandler::libraryItems(const QJsonObject& json, cons
             if (!rel.isEmpty()) it.url = base + rel;
             it.size = lib.contains(QStringLiteral("size")) ? qint64(lib.value(QStringLiteral("size")).toDouble()) : -1;
             it.sha1 = lib.value(QStringLiteral("sha1")).toString();
+        }
+
+        QString nativeClassifier = lib.value(QStringLiteral("natives")).toObject().value(QStringLiteral("windows")).toString();
+        if (!nativeClassifier.isEmpty()) {
+            nativeClassifier.replace(QStringLiteral("${arch}"),
+                                     QSysInfo::currentCpuArchitecture().contains(QLatin1String("64")) ? QStringLiteral("64") : QStringLiteral("32"));
+            const QJsonObject cls = lib.value(QStringLiteral("downloads")).toObject().value(QStringLiteral("classifiers")).toObject()
+                                        .value(nativeClassifier).toObject();
+            if (!cls.value(QStringLiteral("url")).toString().isEmpty() && !cls.value(QStringLiteral("path")).toString().isEmpty()) {
+                DownloadItem n;
+                n.url = cls.value(QStringLiteral("url")).toString();
+                n.path = QDir(libDir).absoluteFilePath(cls.value(QStringLiteral("path")).toString());
+                n.size = cls.contains(QStringLiteral("size")) ? qint64(cls.value(QStringLiteral("size")).toDouble()) : -1;
+                n.sha1 = cls.value(QStringLiteral("sha1")).toString();
+                out << n;
+            }
         }
 
         if (rel.isEmpty() || it.url.isEmpty()) continue;
@@ -1611,6 +1705,8 @@ QStringList MinecraftHandler::parseVersionJson(const QString& gamePath)
     int javaMajor = sm->getJavaMajorVersion(m_launchJavaPath);
     if (javaMajor <= 0) javaMajor = 21;
 
+    extractNatives(chain, gamePath);
+
     const QString librariesDir = gamePath + QStringLiteral("/libraries");
     QStringList classpathList;
     QSet<QString> seen;
@@ -1629,7 +1725,9 @@ QStringList MinecraftHandler::parseVersionJson(const QString& gamePath)
             QString rel;
             const QJsonObject art = lib.value(QStringLiteral("downloads")).toObject().value(QStringLiteral("artifact")).toObject();
             if (!art.isEmpty()) rel = art.value(QStringLiteral("path")).toString();
-            else if (lib.contains(QStringLiteral("name"))) rel = mavenPathFromName(lib.value(QStringLiteral("name")).toString());
+            else if (lib.contains(QStringLiteral("name")) && !lib.contains(QStringLiteral("natives"))
+                     && (lib.contains(QStringLiteral("url")) || !lib.contains(QStringLiteral("downloads"))))
+                rel = mavenPathFromName(lib.value(QStringLiteral("name")).toString());
             if (rel.isEmpty()) continue;
             addCp(QDir(librariesDir).absoluteFilePath(rel));
         }
